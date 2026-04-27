@@ -159,3 +159,46 @@ print('TRACE CONTINUITY CONFIRMED:', chunk['trace_id'][:8])
 -  `example_outputs/` available for offline testing by downstream teams
 -  Run instructions verified from repo root
 -  Acoustic Node handoff documented (import path, output contract, FFT bands)
+
+
+
+## Integration Execution Logs
+
+## DAY 1 — API ALIGNMENT 
+
+**Date:** 27/04/2026
+**Status:** COMPLETE
+
+### What was done
+- Renamed endpoint from /ingest → /ingest/signal (mock_server.py line 9)
+- Validated HTTP 200 for all 5 vessel types manually
+- Ran 30s streaming simulation (cargo + all rotation)
+- Confirmed failure handling for malformed/missing payloads
+- Ran full run_tests.py — all tests passed
+
+### Evidence
+- day1_stream_log.txt — streaming proof
+- day1_test_results.txt — test suite output
+
+### Endpoint status
+- POST http://localhost:8000/ingest/signal → HTTP 200 
+- GET  http://localhost:8000/health → alive 
+
+### trace_id status
+- Present on every chunk 
+- Returned in HTTP response 
+
+### Validation & Error Handling
+- Implemented strict request validation
+- Invalid inputs now return:
+  - HTTP 400 → malformed JSON
+  - HTTP 422 → schema / value errors
+- Prevents silent data corruption
+- Added autocreated test_failures_log.txt 
+
+### Logging System
+- Added ingestion_log.jsonl
+- Logs all accepted and rejected requests
+- Health endpoint tracks:
+  - chunks_received
+  - chunks_rejected
