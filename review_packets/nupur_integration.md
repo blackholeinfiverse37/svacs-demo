@@ -164,7 +164,7 @@ print('TRACE CONTINUITY CONFIRMED:', chunk['trace_id'][:8])
 
 ## Integration Execution Logs
 
-## DAY 1 — API ALIGNMENT 
+## PHASE 1 — API ALIGNMENT 
 
 **Date:** 27/04/2026
 **Status:** COMPLETE
@@ -202,3 +202,74 @@ print('TRACE CONTINUITY CONFIRMED:', chunk['trace_id'][:8])
 - Health endpoint tracks:
   - chunks_received
   - chunks_rejected
+
+
+## PHASE 2 — PIPELINE SUPPORT
+
+**Date:** 28/04/2026
+**Status:** COMPLETE (Self-validated — Acoustic Node integration pending teammate availability)
+
+### What was done
+- Prepared and shared handoff package for Acoustic Node (`handoff_for_acoustic_node.md`)
+- Created `integration_readiness.md` — full schema contract, frequency bands, risk assessment
+- Ran self-simulated integration test (`day2_self_integration.py`) — simulated Acoustic Node consuming all 5 vessel types
+- Ran edge case simulation (`test_edge_cases.py`) — 7 checks per vessel type
+- Confirmed `freq_hz = "mixed"` trap for anomaly — documented safe parsing pattern
+- Fixed HTTP 422 rejection for `vessel_type = "unknown"` (low_confidence outputs this) — added "unknown" to VALID_VESSEL_TYPES in mock_server.py
+
+### Self-Integration Results (5/5 PASS)
+| Vessel Type    | Predicted     | Confidence | Anomaly | Status |
+|----------------|---------------|------------|---------|--------|
+| cargo          | cargo         | 0.945      | False   | PASS   |
+| speedboat      | speedboat     | 0.845      | False   | PASS   |
+| submarine      | submarine     | 0.829      | False   | PASS   |
+| low_confidence | speedboat     | 0.783      | False   | PASS   |
+| anomaly        | anomaly       | 0.0        | True    | PASS   |
+
+### Edge Case Results (5/5 PASS — 7 checks each)
+- Field access, sample size (4000), data types (all float), trace_id (UUID4), anomaly freq_hz handling, normalization, expected_label fields — all passed
+
+### Integration Status
+- Signal layer fully ready for downstream consumption
+- No schema or parsing issues identified
+- Acoustic Node live integration deferred — teammate still building their component
+
+### Evidence
+- `day2_integration_log.txt` — self-simulated integration output
+- `day2_integration_results.json` — structured results
+- `test_edge_cases_log.txt` — 7-check edge case validation
+- `test_edge_cases_results.json` — structured edge case results
+- `integration_readiness.md` — full downstream handoff document
+- `handoff_for_acoustic_node.md` — teammate handoff package
+
+
+## PHASE 3 — TRACE VALIDATION
+
+**Date:** 28/04/2026
+**Status:** COMPLETE
+
+### What was done
+- Added dedicated `trace_log.jsonl` to mock_server.py — logs every accepted chunk with trace_id, vessel_type, and timestamps
+- Ran `trace_test.py` — sent 10 chunks (2 per vessel), confirmed trace_id returned unchanged in every HTTP response
+- Ran `validate_trace.py` — parsed trace_log.jsonl, confirmed no missing, invalid, or duplicate trace_ids
+- Ran `trace_break_test.py` — confirmed server correctly rejects missing/empty/non-UUID trace_ids with HTTP 422
+- Ran full demo stream → validator re-confirmed trace continuity across all 5 vessel types
+
+### Trace Validation Results
+- 10/10 chunks: trace_id sent == trace_id returned 
+- 0 missing trace_ids in log 
+- 0 invalid UUID4 formats 
+- 0 duplicate trace_ids 
+- All entries staged as "signal_ingest" 
+- Bad trace_ids (missing/empty/non-UUID) correctly rejected HTTP 422 
+- Fixed known trace_id preserved exactly through server 
+
+### Trace Flow Confirmed (Signal Layer)
+signal_generator → HybridSignalBuilder → POST /ingest/signal → trace_log.jsonl
+Each stage: trace_id generated (UUID4) → transmitted → returned unchanged → logged
+
+### Evidence
+- `trace_test_log.txt` + `trace_test_results.json`
+- `validate_trace_log.txt` + `validate_trace_results.json`
+- `trace_break_test_log.txt`
+- `api/ingestion_server/trace_log.jsonl`

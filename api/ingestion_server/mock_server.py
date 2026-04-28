@@ -30,7 +30,7 @@ UUID_RE = re.compile(
     re.IGNORECASE
 )
 
-VALID_VESSEL_TYPES = {"cargo", "speedboat", "submarine", "low_confidence", "anomaly"}
+VALID_VESSEL_TYPES = {"cargo", "speedboat", "submarine", "low_confidence", "anomaly", "unknown"}
 
 
 def write_log(entry: dict):
@@ -136,6 +136,17 @@ async def ingest(request: Request):
     write_log(log_entry)
     received.append(trace_id)
 
+    TRACE_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trace_log.jsonl")
+    with open(TRACE_LOG, "a", encoding="utf-8") as tf:
+        json.dump({
+            "stage":       "signal_ingest",
+            "trace_id":    trace_id,
+            "vessel_type": vessel,
+            "chunk_ts":    chunk.get("timestamp"),
+            "server_ts":   round(time.time(), 4)
+        }, tf)
+        tf.write("\n")
+
     print(
         f"[INGEST/SIGNAL] trace={trace_id[:8]}...  "
         f"vessel={vessel:<16}  samples={n}  "
@@ -152,6 +163,7 @@ def health():
         "chunks_received": len(received),
         "chunks_rejected": len(error_log),
         "log_file":        LOG_FILE,
+        "trace_log":       TRACE_LOG,
     }
 
 
