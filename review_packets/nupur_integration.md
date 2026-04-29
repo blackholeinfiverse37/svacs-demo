@@ -303,4 +303,3 @@ Each stage: trace_id generated (UUID4) → transmitted → returned unchanged �
 ### Evidence
 - scenario_validation_log.txt
 - scenario_validation_results.json
-- day4_demo_stream_log.txt
