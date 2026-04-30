@@ -1,7 +1,7 @@
 """
 SVACS — validate_scenarios.py
 ==============================
-DAY 4 | Scenario Validation
+PHASE 4 | Scenario Validation
 
 Loads all 5 pre-built scenario JSON files and validates:
   1. trace_id          — present and UUID4 format

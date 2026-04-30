@@ -22,8 +22,10 @@ app = FastAPI()
 received   = []   # list of trace_ids for health counter
 error_log  = []   # list of rejection reasons
 
-#  Log file (sits next to this script) 
-LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ingestion_log.jsonl")
+#  Log files (module-level so all routes can access them) 
+_DIR      = os.path.dirname(os.path.abspath(__file__))
+LOG_FILE  = os.path.join(_DIR, "ingestion_log.jsonl")
+TRACE_LOG = os.path.join(_DIR, "trace_log.jsonl")
 
 UUID_RE = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
@@ -136,7 +138,6 @@ async def ingest(request: Request):
     write_log(log_entry)
     received.append(trace_id)
 
-    TRACE_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trace_log.jsonl")
     with open(TRACE_LOG, "a", encoding="utf-8") as tf:
         json.dump({
             "stage":       "signal_ingest",
@@ -168,6 +169,7 @@ def health():
 
 
 if __name__ == "__main__":
-    print(f"[SERVER] Logging to: {LOG_FILE}")
-    print(f"[SERVER] Starting on http://0.0.0.0:8000")
+    print(f"[SERVER] Ingestion log : {LOG_FILE}")
+    print(f"[SERVER] Trace log     : {TRACE_LOG}")
+    print(f"[SERVER] Starting on   : http://0.0.0.0:8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)

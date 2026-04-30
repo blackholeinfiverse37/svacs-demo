@@ -1,7 +1,7 @@
 {
-  "run_at": "2026-04-28T16:33:17Z",
-  "total_entries": 47,
-  "real_signal_traces": 45,
+  "run_at": "2026-04-30T10:17:57Z",
+  "total_entries": 62,
+  "real_signal_traces": 60,
   "test_uuids_skipped": 2,
   "overall_pass": true,
   "errors": []
