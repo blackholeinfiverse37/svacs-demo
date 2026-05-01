@@ -348,3 +348,172 @@ handoff documentation, and validated example outputs.
 
 Note: All core tests passed successfully. 
 The distinguishability test was excluded due to a Windows encoding issue (non-impacting to pipeline functionality).
+
+
+
+## PHASE 6 — PERCEPTION NODE (Signal → Meaning)
+
+**Date:** 01/05/2026  
+**Status:** COMPLETE  
+**Task:** SVACS Perception Node + Data Realism Integration
+
+### What I Built
+- `services/data_layer/perception_node.py` — full FFT-based signal interpretation layer
+- `services/data_layer/perception_integration.py` — Phase 5 live pipeline integration runner
+
+### What It Does
+Converts raw `signal_chunk` → structured `perception_event` using deterministic FFT rules.  
+No ML. No randomness. Fully traceable via `trace_id`.
+
+---
+
+### Phase Breakdown
+
+**Phase 1 — Schema Validation**  
+- Validates `trace_id`, `samples`, `sample_rate` on every incoming chunk  
+- Returns structured error dict on failure — never crashes silently
+
+**Phase 2 — FFT + Feature Extraction**  
+- Runs `numpy.fft.rfft` on signal samples  
+- Extracts: `dominant_freq_hz`, `peak_amplitude`, `total_energy`, `noise_floor`, `snr`  
+- All outputs logged with `trace_id`
+
+**Phase 3 — Classification + Anomaly Detection**  
+- Deterministic rule-based classifier (priority order):
+
+| Vessel Type | Rule |
+|---|---|
+| submarine | 20–100 Hz AND energy < 1,200,000 |
+| cargo | 50–200 Hz |
+| speedboat | 500–1500 Hz |
+| unknown | no rule matched |
+
+- Anomaly triggers: `multi-peak`, `unclear-band`, `low-snr`  
+- Confidence: `SNR / 250.0`, capped at 1.0
+
+**Phase 4 — Output Contract**  
+Every `perception_event` contains exactly these 5 fields:
+
+```json
+{
+  "trace_id": "...",
+  "vessel_type": "cargo",
+  "confidence_score": 0.91,
+  "dominant_freq_hz": 120.5,
+  "anomaly_flag": false
+}
+```
+
+`trace_id` is NEVER regenerated — copied unchanged from `signal_chunk`.
+
+**Phase 5 — Live Integration**  
+- Ran `perception_integration.py` — 15 chunks (3 × 5 vessel types) through full pipeline  
+- mock_server + perception_node connected end-to-end
+
+---
+
+### Self-Test Results (5/5 PASS)
+
+| Vessel Type    | Predicted     | Confidence | Anomaly | Status |
+|----------------|---------------|------------|---------|--------|
+| cargo          | cargo         | confirmed  | False   | PASS   |
+| speedboat      | speedboat     | confirmed  | False   | PASS   |
+| submarine      | submarine     | confirmed  | False   | PASS   |
+| low_confidence | (classified)  | low        | varies  | PASS   |
+| anomaly        | unknown       | 0.0        | True    | PASS   |
+
+- 15/15 trace_id continuity confirmed (input = server = output)
+- All 5 perception_event fields present on every chunk
+- No silent failures
+
+### Key Design Decision
+Submarine (20–100 Hz) overlaps with cargo (50–200 Hz).  
+Energy is the tiebreaker: submarine energy ~600k–900k vs cargo ~1.9M–2.2M.  
+`SUBMARINE_MAX_ENERGY = 1,200,000` calibrated from real HybridSignalBuilder output.
+
+### Evidence
+- `perception_node.py` — main deliverable (all 4 functions)
+- `perception_integration.py` — Phase 5 live run script
+- `PERCEPTION_NODE_GUIDE.md` — full execution guide
+- Phase 5 logs: 15/15 PASS, trace continuity confirmed
+
+
+
+## PHASE 7 — SNR FIX + PERCEPTION BRIDGE (Data Layer to Perception Bridge)
+
+**Date:** 01/05/2026  
+**Status:** COMPLETE  
+**Task:** Signal → Perception Integration + SNR Fix
+
+### What I Built
+- `hybrid_signal_builder.py` — updated with correct SNR formula + per-vessel noise scaling
+- `mock_server.py` — updated with dual endpoints + live perception hook + latency tracking
+- `snr_perception_integration.py` — full 5-phase validation runner
+
+---
+
+### Phase Breakdown
+
+**Phase 1 — SNR Fix**  
+- Old formula `20*log10(std/std)` was wrong — amplitude-based, no per-vessel variation  
+- Fixed to `10*log10(signal_power / noise_power)` (correct power formula per task spec)  
+- Added `VESSEL_NOISE_SCALE` per vessel type to control noise level independently
+
+| Vessel Type    | SNR Result | Target Range | Status |
+|----------------|------------|--------------|--------|
+| cargo          | ~20 dB     | 15–25 dB     | PASS   |
+| speedboat      | ~16 dB     | 10–20 dB     | PASS   |
+| submarine      | ~7 dB      | 5–10 dB      | PASS   |
+| low_confidence | ~2 dB      | <5 dB        | PASS   |
+| anomaly        | ~11 dB     | variable     | PASS   |
+
+**Phase 2 — Dual Endpoint Contract**  
+- Added `POST /ingest` as PRIMARY endpoint  
+- `POST /ingest/signal` retained as ALIAS  
+- Both routes share single `_handle_ingest()` function — identical logic, identical responses  
+- Verified: same payload sent to both endpoints returns matching HTTP 200 + same `trace_id`
+
+**Phase 3 — Live Perception Connection**  
+- `process_signal()` now called inside server on every accepted chunk  
+- `perception_event` returned in HTTP response body  
+- `api/ingestion_server/perception_log.jsonl` logs every signal→perception transformation
+
+**Phase 4 — Transformation Log**  
+Every logged entry format:
+```json
+{
+  "trace_id": "...",
+  "input_vessel": "cargo",
+  "predicted_vessel": "cargo",
+  "confidence": 0.91,
+  "dominant_freq": 120.5,
+  "anomaly": false,
+  "snr_db": 19.8,
+  "latency_ms": 4.2
+}
+```
+All 5 vessel types captured in `transformation_log.jsonl`.
+
+**Phase 5 — Latency Measurement**  
+- Latency tracked per event: `ingest_received_time → perception_output_time`  
+- Results logged in `/health` endpoint and integration runner output  
+- Target: avg <100ms, max <100ms — PASS (FFT on 4000 samples typically 2–10ms)
+
+---
+
+### Integration Results (15/15 PASS)
+
+| Phase | Metric | Result |
+|---|---|---|
+| SNR Fix | 5/5 vessel types in correct range | PASS |
+| Dual Endpoints | /ingest == /ingest/signal | PASS |
+| Perception Live | 15/15 chunks processed | PASS |
+| Trace Continuity | 15/15 trace_ids preserved | PASS |
+| Latency | avg <100ms, max <100ms | PASS |
+
+### Evidence
+- `hybrid_signal_builder.py` — `VESSEL_NOISE_SCALE` + `10*log10` power formula
+- `mock_server.py` — dual endpoints + `_handle_ingest()` shared handler
+- `snr_perception_integration.py` — 5-phase validation runner
+- `api/ingestion_server/perception_log.jsonl` — live transformation log
+- `services/data_layer/transformation_log.jsonl` — 5-vessel summary
