@@ -517,3 +517,169 @@ All 5 vessel types captured in `transformation_log.jsonl`.
 - `snr_perception_integration.py` — 5-phase validation runner
 - `api/ingestion_server/perception_log.jsonl` — live transformation log
 - `services/data_layer/transformation_log.jsonl` — 5-vessel summary
+
+---
+
+---
+
+## PHASE 8 — PERCEPTION NODE (Signal → Meaning)
+
+**Date:** 02/05/2026 - 04/05/2026
+**Status:** COMPLETE
+**Task:** SVACS Perception Node + Data Realism Integration
+
+### What I Built
+- `services/data_layer/perception_node.py` — full FFT-based signal interpretation layer
+- `services/data_layer/perception_integration.py` — Phase 5 live pipeline integration runner
+
+### What It Does
+Converts raw `signal_chunk` → structured `perception_event` using deterministic FFT rules.
+
+### Phase Breakdown
+
+**Phase 1 — Schema Validation**
+- Validates `trace_id`, `samples`, `sample_rate` on every incoming chunk
+- Returns structured error dict on failure
+
+**Phase 2 — FFT + Feature Extraction**
+- Runs `numpy.fft.rfft` on signal samples
+- Extracts: `dominant_freq_hz`, `peak_amplitude`, `total_energy`, `noise_floor`, `snr`
+- All outputs logged with `trace_id`
+
+**Phase 3 — Classification + Anomaly Detection**
+- Deterministic rule-based classifier (priority order):
+
+| Vessel Type | Rule |
+|---|---|
+| submarine | 20–100 Hz AND energy < 1,200,000 |
+| cargo | 50–200 Hz |
+| speedboat | 500–1500 Hz |
+| unknown | no rule matched |
+
+- Anomaly triggers: `multi-peak`, `unclear-band`, `low-snr`
+- Confidence: `SNR / 250.0`, capped at 1.0
+
+**Phase 4 — Output Contract**
+Every `perception_event` contains exactly these 5 fields:
+```json
+{
+  "trace_id": "...",
+  "vessel_type": "cargo",
+  "confidence_score": 0.91,
+  "dominant_freq_hz": 120.5,
+  "anomaly_flag": false
+}
+```
+`trace_id` is NEVER regenerated — copied unchanged from `signal_chunk`.
+
+**Phase 5 — Live Integration**
+- Ran `perception_integration.py` — 15 chunks (3 × 5 vessel types) through full pipeline
+- mock_server + perception_node connected end-to-end
+
+### Results (15/15 PASS)
+
+| Vessel Type    | Predicted    | Confidence | Anomaly | Status |
+|----------------|--------------|------------|---------|--------|
+| cargo          | cargo        | 1.0        | False   | PASS   |
+| speedboat      | speedboat    | confirmed  | False   | PASS   |
+| submarine      | submarine    | confirmed  | False   | PASS   |
+| low_confidence | (classified) | low        | varies  | PASS   |
+| anomaly        | unknown      | 0.0        | True    | PASS   |
+
+- 15/15 trace_id continuity confirmed (input = server = output)
+- All 5 perception_event fields present on every chunk
+- No silent failures
+
+### Key Design Decision
+Submarine (20–100 Hz) overlaps with cargo (50–200 Hz).
+Energy is the tiebreaker: submarine energy ~600k–900k vs cargo ~1.9M–2.2M.
+`SUBMARINE_MAX_ENERGY = 1,200,000` calibrated from real HybridSignalBuilder output.
+
+### Evidence
+- `perception_node.py` 
+- `perception_integration.py` — Phase 5 live run script
+- `PERCEPTION_NODE_GUIDE.md` — full execution guide
+
+---
+
+## PHASE 9 — END-TO-END PIPELINE INTEGRATION
+
+**Date:** 04/05/2026 – 05/05/2026
+**Status:** COMPLETE (live run with State Engine pending Raj's ngrok URL)
+**Task:** Signal → Intelligence → State Execution (Full System Proof)
+
+### What I Built
+
+| File | Purpose |
+|---|---|
+| `pipeline_connector.py` | Full pipeline runner: signal → perception → NICAI → State Engine → Bucket |
+| `trace_reconstruction.py` | Lifecycle proof script — reconstructs any trace_id from log files |
+| `temporal_aggregator.py` | Rolling window aggregator (avg confidence, anomaly trend, window=5) |
+| `bucket_verification.py` | SHA256 write → read → hash compare against Siddhesh's Bucket |
+| `generate_trace_proof.py` | Generates 5-case trace proof JSON for team coordination |
+
+### Phase Breakdown
+
+**Phase 1 — NICAI Integration (Live)**
+- Connected to Ankita's NICAI endpoint via ngrok
+- Endpoint: `POST https://dumping-jingle-daylight.ngrok-free.dev/nicai/classify`
+- Fixed NICAI response parsing — `intelligence_event` extracted from wrapper response
+- Fixed trace_id null issue — Ankita patched her side, confirmed working
+- 25/25 chunks processed: NICAI ALLOW 25/25, trace continuity 25/25
+
+**Phase 2 — State Engine Integration**
+- Endpoint confirmed: `POST http://localhost:9000/ingest/intelligence`
+- Header required: `ngrok-skip-browser-warning: true`
+- `pipeline_connector.py` updated with correct endpoint and headers
+- Live run pending Raj's active ngrok URL (server not running continuously)
+
+**Phase 3 — End-to-End Pipeline**
+- signal → perception → NICAI: 25/25 PASS, trace continuity 25/25
+- Full chain confirmed via Raj's independent proof run (see Phase 8 below)
+
+**Phase 4 — Trace Reconstruction Proof**
+- `trace_reconstruction.py` built and tested
+- Searches 5 log files: signal_ingest, perception, transformation, full_pipeline, bucket
+- Run: `python trace_reconstruction.py --latest`
+
+**Phase 5 — Validation Status Propagation**
+- `validation_status` (ALLOW/FLAG) captured from Ankita's NICAI response
+- Logged in `full_pipeline_log.jsonl` per chunk
+- Visible in pipeline_connector.py summary output
+
+**Phase 6 — Temporal Aggregation**
+- `temporal_aggregator.py` — window size 5 per vessel type
+- Computes: `avg_confidence`, `anomaly_rate`, `anomaly_trend` (increasing/decreasing/stable)
+- No ML. Pure deterministic arithmetic.
+- Integrated into `pipeline_connector.py` — runs on every chunk automatically
+
+**Phase 7 — Bucket Verification**
+- Siddhesh's endpoints confirmed:
+  - `POST http://localhost:8000/bucket/artifact`
+  - `GET http://localhost:8000/bucket/artifact/{artifact_id}`
+  - `GET http://localhost:8000/bucket/artifacts?trace_id={trace_id}`
+- SHA256 hash computed before write and after read — compared for equality
+- `bucket_verification.py` built and ready — pending Siddhesh deployment
+
+**Phase 8 — End-to-End Proof (Team Coordination)**
+- Generated 5-case trace proof: `5_trace_cases.json`
+- Shared with Raj — he forwarded trace_ids to Ankita
+- Ankita ran NICAI → validation → intelligence on all 5 cases
+- Raj ran State Engine on all 5 cases
+- All 5 cases PASSED: cargo, speedboat, submarine, low_confidence, anomaly
+- Full chain confirmed: signal → perception → NICAI → validation → intelligence → state_engine
+
+### Intelligence Event Schema (Ankita's NICAI output)
+```json
+{
+  "trace_id": "...",
+  "vessel_type": "cargo",
+  "confidence": 0.91,
+  "risk_level": "LOW",
+  "anomaly_flag": false,
+  "explanation": "Normal condition",
+  "validation_status": "ALLOW"
+}
+```
+
+### State Engine Endpoint (Raj)
