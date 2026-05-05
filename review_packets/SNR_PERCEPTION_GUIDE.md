@@ -6,12 +6,11 @@
 
 ---
 
-## What This Task Is — Plain English
+## What This Task Is 
 
-Your previous task built the perception node (FFT → classify → perception_event).  
-This task **wires it all together live** and fixes one critical bug along the way.
+The previous task built the perception node (FFT → classify → perception_event).  
 
-**Three things you must deliver:**
+**Three things to must deliver:**
 
 | # | Deliverable | What's Broken Now | Fix |
 |---|---|---|---|
@@ -19,20 +18,10 @@ This task **wires it all together live** and fixes one critical bug along the wa
 | 2 | Both `/ingest` + `/ingest/signal` endpoints | Only `/ingest/signal` exists | Add `/ingest` as an identical alias |
 | 3 | Live signal→perception pipeline | Perception node runs offline only | Call it inside the server on every ingest |
 
----
-
-## Files You Will Change / Create
-
-| File | Action | Where in repo |
-|---|---|---|
-| `hybrid_signal_builder.py` | **REPLACE** with fixed version | `services/data_layer/` |
-| `mock_server.py` | **REPLACE** with updated version | `api/ingestion_server/` |
-| `snr_perception_integration.py` | **CREATE** (validation runner) | `services/data_layer/` |
-| `nupur_integration.md` | **APPEND** new phase sections | `services/data_layer/` (or root) |
 
 ---
 
-## PHASE 1 — Fix SNR (Hour 0–1.5)
+## PHASE 1 — Fix SNR 
 
 ### The Bug
 
@@ -80,7 +69,7 @@ chunk["snr_db"] = round(float(20 * np.log10(
     (np.std(vessel_signal) + 1e-9) / (np.std(ocean_noise) + 1e-9)
 )), 2)
 
-# NEW (replace with):
+# NEW :
 ocean_noise_base = self._get_noise_slice(len(vessel_signal))
 scale = VESSEL_NOISE_SCALE.get(vessel_type, 0.5)
 ocean_noise = ocean_noise_base * scale
@@ -124,7 +113,7 @@ anomaly         SNR=+11.3 dB   NoiseFloor=-20.7 dB
 
 ---
 
-## PHASE 2 — Dual Endpoint (Hour 1.5–2.5)
+## PHASE 2 — Dual Endpoint 
 
 ### What to do
 
@@ -137,14 +126,7 @@ The updated server adds:
 - Latency measurement added per event
 - `GET /perception_log` — new endpoint to inspect perception events
 
-**Step 2.1 — Replace mock_server.py**
-
-```bash
-# From repo root:
-cp mock_server_updated.py api/ingestion_server/mock_server.py
-```
-
-**Step 2.2 — Start the server**
+**Step 2.1 — Start the server**
 
 ```bash
 # Terminal 1 — start server
@@ -157,7 +139,7 @@ You should see:
 [SERVER] Starting on: http://0.0.0.0:8000
 ```
 
-**Step 2.3 — Test both endpoints manually**
+**Step 2.2 — Test both endpoints manually**
 
 ```bash
 # Terminal 2 — test that both endpoints return identical responses
@@ -218,7 +200,7 @@ print('Import OK')
 "
 ```
 
-If this fails, add a symlink or adjust the path in `mock_server_updated.py` line ~25:
+If this fails, add a symlink or adjust the path in `mock_server.py` line ~25:
 ```python
 _DATA_LAYER = os.path.join(os.path.dirname(_SERVER_DIR), "services", "data_layer")
 ```
@@ -324,136 +306,3 @@ PHASE 5 — LATENCY REPORT
 
 ---
 
-## REVIEW_PACKET.md — What To Do
-
-**You do NOT create a separate file.** Add new sections to your existing `nupur_integration.md`.
-
-Append these two sections at the bottom:
-
----
-
-```markdown
-## PHASE 6 — SNR FIX
-
-**Date:** [today]
-**Status:** COMPLETE
-
-### What was done
-- Fixed SNR formula: changed from `20*log10(std/std)` → `10*log10(power/power)`
-- Added per-vessel noise scaling to `hybrid_signal_builder.py`
-- SNR now varies meaningfully across vessel types
-
-### SNR Results (after fix)
-| Vessel Type    | SNR (dB) | Target Range | Status |
-|----------------|----------|--------------|--------|
-| cargo          | ~20 dB   | 15–25 dB     | PASS   |
-| speedboat      | ~16 dB   | 10–20 dB     | PASS   |
-| submarine      | ~7 dB    | 5–10 dB      | PASS   |
-| low_confidence | ~2 dB    | <5 dB        | PASS   |
-| anomaly        | ~12 dB   | variable     | PASS   |
-
-### Evidence
-- `hybrid_signal_builder.py` — updated with `VESSEL_NOISE_SCALE` and power formula
-- `snr_perception_integration.py` Phase 1 output
-```
-
-```markdown
-## PHASE 7 — PERCEPTION BRIDGE
-
-**Date:** [today]
-**Status:** COMPLETE
-
-### What was done
-- Added `POST /ingest` as primary endpoint (alias for `/ingest/signal`)
-- Both endpoints share identical logic via `_handle_ingest()`
-- `process_signal()` called inline on every accepted chunk
-- `perception_log.jsonl` logs full signal→perception transformation per chunk
-- Latency tracked per event (target: <100ms)
-
-### Integration Results (15/15 PASS)
-| Phase | Metric | Result |
-|---|---|---|
-| Dual endpoint | /ingest == /ingest/signal | PASS |
-| Perception live | 15/15 chunks processed | PASS |
-| Trace continuity | 15/15 trace_ids preserved | PASS |
-| Latency | avg Xms, max Xms | PASS |
-
-### Transformation Log Sample
-(paste 5-line sample from transformation_log.jsonl here)
-
-### Evidence
-- `mock_server.py` — updated with dual endpoints + perception hook
-- `snr_perception_integration.py` — full validation runner
-- `api/ingestion_server/perception_log.jsonl` — transformation log
-- `services/data_layer/transformation_log.jsonl` — 5-vessel summary
-```
-
----
-
-## Full Execution Sequence (Commands Only)
-
-```bash
-# 0. Copy fixed files into repo
-cp hybrid_signal_builder_fixed.py  svacs-demo/services/data_layer/hybrid_signal_builder.py
-cp mock_server_updated.py          svacs-demo/api/ingestion_server/mock_server.py
-cp snr_perception_integration.py   svacs-demo/services/data_layer/
-
-# 1. Verify SNR fix
-cd svacs-demo/services/data_layer
-python hybrid_signal_builder.py
-# Expected: cargo ~20dB, submarine ~7dB, low_confidence ~2dB
-
-# 2. Start server (Terminal 1)
-cd svacs-demo
-python api/ingestion_server/mock_server.py
-
-# 3. Test dual endpoints (Terminal 2)
-cd svacs-demo/services/data_layer
-python -c "
-import requests, sys
-sys.path.insert(0,'.')
-from hybrid_signal_builder import HybridSignalBuilder
-chunk = HybridSignalBuilder().build('cargo')
-r1 = requests.post('http://localhost:8000/ingest', json=chunk)
-r2 = requests.post('http://localhost:8000/ingest/signal', json=chunk)
-print(r1.status_code, r2.status_code, 'both 200?', r1.status_code == r2.status_code == 200)
-"
-
-# 4. Run full validation (all 5 phases)
-python snr_perception_integration.py
-
-# 5. Check health + latency
-curl http://localhost:8000/health
-
-# 6. Confirm perception log
-cat ../../api/ingestion_server/perception_log.jsonl | python -m json.tool | head -40
-
-# 7. Update nupur_integration.md (append Phase 6 + Phase 7 sections)
-```
-
----
-
-## Success Checklist
-
-- [ ] `hybrid_signal_builder.py` updated — uses `VESSEL_NOISE_SCALE` + `10*log10` power formula  
-- [ ] `python hybrid_signal_builder.py` shows SNR in correct ranges for all 5 vessel types  
-- [ ] `mock_server.py` updated — `POST /ingest` and `POST /ingest/signal` both return HTTP 200  
-- [ ] Both endpoints return identical responses for same payload  
-- [ ] `process_signal()` called inside server — `perception_event` appears in HTTP response  
-- [ ] `api/ingestion_server/perception_log.jsonl` exists with ≥5 entries (one per vessel)  
-- [ ] `snr_perception_integration.py` shows 15/15 PASS  
-- [ ] Latency: avg <100ms, max <100ms  
-- [ ] `trace_id` unchanged end-to-end (input = server = perception output)  
-- [ ] `nupur_integration.md` updated with Phase 6 (SNR) and Phase 7 (Perception Bridge) sections  
-
----
-
-## Common Issues + Fixes
-
-| Issue | Cause | Fix |
-|---|---|---|
-| `ImportError: perception_node` | Server can't find perception_node.py | Check path in mock_server.py line ~25; ensure both files are in same or correct relative directory |
-| SNR still shows wrong values | Old `hybrid_signal_builder.py` still in place | Confirm you copied the fixed version — check for `VESSEL_NOISE_SCALE` at top of file |
-| `/ingest` returns 404 | Old mock_server.py still running | Stop server, copy `mock_server_updated.py` → `mock_server.py`, restart |
-| `perception_event` not in response | `PERCEPTION_AVAILABLE = False` in server logs | Fix import path (see above); check server startup logs for `[SERVER] perception_node imported successfully` |
-| Latency > 100ms | Cold start on first run | Run a warmup chunk first; FFT on 4000 samples is typically 2–10ms |
