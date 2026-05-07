@@ -32,11 +32,13 @@ from bucket_verification import verify_bucket, verify_trace_bucket
 
 # ── Endpoints  ──────────────────────────────────
 NICAI_ENDPOINT  = "https://dumping-jingle-daylight.ngrok-free.dev/nicai/classify"   # ← Ankita
-STATE_ENDPOINT  = "http://localhost:9000/ingest/intelligence"     # ← Raj
-BUCKET_BASE     = "http://localhost:8000"       # ← Siddhesh
+STATE_ENDPOINT  = "https://7516-157-119-200-153.ngrok-free.app/ingest/intelligence"     # ← Raj
+BUCKET_BASE     = "https://reseller-rebuilt-jubilant.ngrok-free.dev"       # ← Siddhesh
 # ─────────────────────────────────────────────────────────────────────────────
 
 LOG_FILE = os.path.join(BASE_DIR, "full_pipeline_log.jsonl")
+
+
 
 # Ankita's intelligence_event fields
 INTELLIGENCE_FIELDS = [
@@ -141,7 +143,7 @@ def verify_trace_continuity(signal_chunk, perception_event,
 
 
 def run_pipeline(signal_chunk: dict, aggregator: TemporalAggregator,
-                 run_bucket: bool = True) -> dict:
+                 run_bucket: bool = True, bucket_start_hash: str = None) -> dict:
     """
     Full pipeline for one signal_chunk.
     Returns complete result dict.
@@ -184,16 +186,19 @@ def run_pipeline(signal_chunk: dict, aggregator: TemporalAggregator,
     )
     print(f"    → trace:        {'ALL MATCH ' if continuity['all_match'] else 'MISMATCH '}")
 
-    # Stage 6: Bucket verification
+    # Stage 6: Bucket verification (chained)
     bucket_results = {}
     if run_bucket:
+        current_hash = bucket_start_hash  # use hash passed in from previous chunk
         for stage_name, event in [
-            ("perception",    {**perception_event,    "stage": "perception",    "pipeline": "SVACS"}),
-            ("intelligence",  {**intelligence_event,  "stage": "intelligence",  "pipeline": "SVACS"}),
-            ("state",         {**state_event,         "stage": "state",         "pipeline": "SVACS"}),
+            ("perception",   {**perception_event,   "stage": "perception",   "pipeline": "SVACS"}),
+            ("intelligence", {**intelligence_event, "stage": "intelligence", "pipeline": "SVACS"}),
+            ("state",        {**state_event,        "stage": "state",        "pipeline": "SVACS"}),
         ]:
             if "error" not in event:
-                bucket_results[stage_name] = verify_bucket(event, stage=stage_name)
+                bucket_result = verify_bucket(event, stage=stage_name, parent_hash=current_hash)
+                bucket_results[stage_name] = bucket_result
+                current_hash = bucket_result.get("next_hash")
 
     latency_ms = round((time.time() - t_start) * 1000, 3)
 
@@ -235,12 +240,19 @@ def run_full_pipeline(count: int = 5, run_bucket: bool = True):
     passed    = 0
     failed    = 0
     latencies = []
+    current_hash = None
 
     # Cycle through vessel types to ensure all 5 are covered
     for i in range(count):
         vtype = VESSEL_TYPES[i % len(VESSEL_TYPES)]
         chunk = builder.build(vtype)
-        result = run_pipeline(chunk, aggregator, run_bucket=run_bucket)
+        result = run_pipeline(chunk, aggregator, run_bucket=run_bucket,bucket_start_hash=current_hash)
+
+        # Update hash for next chunk
+        if run_bucket and result.get("bucket_results"):
+            for stage_result in result["bucket_results"].values():
+                if stage_result.get("next_hash"):
+                    current_hash = stage_result["next_hash"]
 
         if "error" not in result:
             passed += 1
