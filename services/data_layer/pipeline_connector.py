@@ -29,10 +29,15 @@ from perception_node import process_signal
 from hybrid_signal_builder import HybridSignalBuilder
 from temporal_aggregator import TemporalAggregator
 from bucket_verification import verify_bucket, verify_trace_bucket
+from execution_observability import ObservabilityLogger
+
+
+obs = ObservabilityLogger()
+
 
 # ── Endpoints  ──────────────────────────────────
 NICAI_ENDPOINT  = "https://dumping-jingle-daylight.ngrok-free.dev/nicai/classify"   # ← Ankita
-STATE_ENDPOINT  = "https://7516-157-119-200-153.ngrok-free.app/ingest/intelligence"     # ← Raj
+STATE_ENDPOINT  = "https://9c30-157-119-200-153.ngrok-free.app/ingest/intelligence"     # ← Raj
 BUCKET_BASE     = "https://reseller-rebuilt-jubilant.ngrok-free.dev"       # ← Siddhesh
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -154,6 +159,21 @@ def run_pipeline(signal_chunk: dict, aggregator: TemporalAggregator,
 
     print(f"\n  [PIPELINE] trace={trace_id[:8]}...  vessel={vtype}")
 
+
+ # Write signal entry to trace_log so replay engine can find it
+    import time as _time
+    signal_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "api", "ingestion_server", "trace_log.jsonl")
+    with open(signal_log_path, "a", encoding="utf-8") as _f:
+        _f.write(json.dumps({
+            "trace_id":   trace_id,
+            "vessel_type": vtype,
+            "chunk_ts":   signal_chunk.get("timestamp"),
+            "server_ts":  _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+            "stage":      "signal_ingest",
+            "source":     "pipeline_connector"
+        }) + "\n")
+
+
     # Stage 1: Perception
     perception_event = process_signal(signal_chunk)
     if "error" in perception_event:
@@ -179,6 +199,36 @@ def run_pipeline(signal_chunk: dict, aggregator: TemporalAggregator,
     state_event = send_to_state_engine(intelligence_event)
     state_ok = "error" not in state_event
     print(f"    → state:        {'OK' if state_ok else 'State Engine not connected'}")
+
+
+    # Log to observability
+    obs.log_pipeline_run(
+        trace_id=trace_id,
+        vessel_type=vtype,
+        passed=(nicai_ok and state_ok),
+        latency_ms=round((time.time() - t_start) * 1000, 2),
+        nicai_allow=intelligence_event.get("validation_status") == "ALLOW",
+        state_ok=state_ok,
+        trace_continuity=True  # updated after continuity check below
+    )
+
+    # Log anomaly escalation if detected
+    if perception_event.get("anomaly_flag"):
+        obs.log_anomaly_escalation(
+            trace_id=trace_id,
+            vessel_type=perception_event.get("vessel_type", "unknown"),
+            risk_level=intelligence_event.get("risk_level", "UNKNOWN"),
+            reasons=perception_event.get("anomaly_reasons", [])
+        )
+
+    # Log server disconnections
+    if not nicai_ok:
+        obs.log_server_status("NICAI", "DISCONNECTED",
+                              intelligence_event.get("reason", "unknown"))
+    if not state_ok:
+        obs.log_server_status("StateEngine", "DISCONNECTED",
+                              state_event.get("reason", "unknown"))
+        
 
     # Stage 5: Trace continuity
     continuity = verify_trace_continuity(
@@ -217,8 +267,7 @@ def run_pipeline(signal_chunk: dict, aggregator: TemporalAggregator,
     }
 
     # Log (without large sample arrays)
-    log_entry = {k: v for k, v in result.items()
-                 if k not in ("perception_event",)}
+    log_entry = {k: v for k, v in result.items()}
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(log_entry) + "\n")
 
