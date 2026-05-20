@@ -26,10 +26,11 @@ import os
 import time
 import requests
 
-BUCKET_BASE      = "https://reseller-rebuilt-jubilant.ngrok-free.dev"
-WRITE_ENDPOINT   = f"{BUCKET_BASE}/bucket/artifact"
-READ_BY_ID       = f"{BUCKET_BASE}/bucket/artifact/{{artifact_id}}"
-READ_BY_TRACE    = f"{BUCKET_BASE}/bucket/artifacts?trace_id={{trace_id}}"
+BUCKET_BASE    = "https://bhiv-bucket.onrender.com"
+WRITE_ENDPOINT = f"{BUCKET_BASE}/bucket/artifact"
+LATEST_HASH    = f"{BUCKET_BASE}/bucket/chain-state"
+READ_BY_ID     = f"{BUCKET_BASE}/bucket/artifact/{{artifact_id}}"
+READ_BY_TRACE  = f"{BUCKET_BASE}/bucket/artifacts?trace_id={{trace_id}}"
 
 LOG_DIR  = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(LOG_DIR, "bucket_verification_log.jsonl")
@@ -44,21 +45,36 @@ def compute_hash(payload: dict) -> str:
 # Genesis hash provided by Siddhesh — use this as parent_hash for FIRST artifact only
 GENESIS_HASH = "f54aac459e343356775c39f17b8d1debf60675ca94091e78bc5653710f03b06e"
 
+
+def get_latest_hash() -> str:
+    try:
+        r = requests.get(LATEST_HASH, timeout=30)
+        if r.status_code == 200:
+            data = r.json()
+            chain = data.get("chain_state", {})
+            return chain.get("last_hash") or None
+        return None
+    except Exception:
+        return None
+
+
 def write_to_bucket(event: dict, stage: str = "perception", parent_hash: str = None) -> dict:
     try:
         import uuid
         from datetime import datetime, timezone
 
-        artifact_id = str(uuid.uuid4())
+        artifact_id  = str(uuid.uuid4())
+        current_hash = parent_hash or get_latest_hash()  # None is correct for first artifact
+
+        # ArtifactEnvelope — trace_id goes inside payload only, NOT at envelope level
         payload = {
             "artifact_id":      artifact_id,
-            "trace_id":         event.get("trace_id"),
             "timestamp_utc":    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "schema_version":   "1.0.0",
             "source_module_id": "nupur_signal_perception",
             "artifact_type":    stage,
-            "parent_hash":      parent_hash or GENESIS_HASH,
-            "payload":          event
+            "parent_hash":      current_hash,
+            "payload":          event  # trace_id lives here inside event
         }
 
         r = requests.post(
@@ -66,9 +82,8 @@ def write_to_bucket(event: dict, stage: str = "perception", parent_hash: str = N
             json=payload,
             headers={
                 "Content-Type": "application/json",
-                "ngrok-skip-browser-warning": "true"
             },
-            timeout=10
+            timeout=30
         )
         if r.status_code in (200, 201):
             response = r.json()
@@ -76,7 +91,7 @@ def write_to_bucket(event: dict, stage: str = "perception", parent_hash: str = N
                 "success":     True,
                 "response":    response,
                 "artifact_id": response.get("artifact_id", artifact_id),
-                "next_hash":   response.get("hash")  # use this as parent_hash for next artifact
+                "next_hash":   response.get("hash") or response.get("last_hash")
             }
         return {"success": False, "reason": f"HTTP {r.status_code}", "body": r.text}
     except Exception as e:
@@ -86,13 +101,12 @@ def write_to_bucket(event: dict, stage: str = "perception", parent_hash: str = N
 def read_from_bucket(artifact_id: str) -> dict:
     try:
         url = READ_BY_ID.format(artifact_id=artifact_id)
-        r   = requests.get(
-            url,
-            headers={"ngrok-skip-browser-warning": "true"},
-            timeout=10
-        )
+        r   = requests.get(url, timeout=30)
         if r.status_code == 200:
-            return {"success": True, "payload": r.json()}
+            data = r.json()
+            # Response is wrapped: {"artifact": {...}, "chain_verified": true}
+            artifact = data.get("artifact", data)
+            return {"success": True, "payload": artifact.get("payload", artifact)}
         return {"success": False, "reason": f"HTTP {r.status_code}"}
     except Exception as e:
         return {"success": False, "reason": str(e)}
