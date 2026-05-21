@@ -37,7 +37,7 @@ obs = ObservabilityLogger()
 
 # ── Endpoints  ──────────────────────────────────
 NICAI_ENDPOINT  = "https://dumping-jingle-daylight.ngrok-free.dev/nicai/classify"   # ← Ankita
-STATE_ENDPOINT  = "https://2fce-157-119-200-153.ngrok-free.app/ingest/intelligence"     # ← Raj
+STATE_ENDPOINT  = "https://18a4-157-119-200-153.ngrok-free.app/ingest/intelligence"     # ← Raj
 BUCKET_BASE     = "https://reseller-rebuilt-jubilant.ngrok-free.dev"       # ← Siddhesh
 # ─────────────────────────────────────────────────────────────────────────────
 
