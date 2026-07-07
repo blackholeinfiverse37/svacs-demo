@@ -38,7 +38,7 @@ obs = ObservabilityLogger()
 # ── Endpoints  ──────────────────────────────────
 NICAI_ENDPOINT  = "https://dumping-jingle-daylight.ngrok-free.dev/nicai/classify"   # ← Ankita
 STATE_ENDPOINT  = "https://18a4-157-119-200-153.ngrok-free.app/ingest/intelligence"     # ← Raj
-BUCKET_BASE     = "https://reseller-rebuilt-jubilant.ngrok-free.dev"       # ← Siddhesh
+BUCKET_BASE     = "https://bhiv-bucket-i1l6.onrender.com"       # ← Siddhesh
 # ─────────────────────────────────────────────────────────────────────────────
 
 LOG_FILE = os.path.join(BASE_DIR, "full_pipeline_log.jsonl")

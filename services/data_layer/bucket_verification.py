@@ -26,7 +26,7 @@ import os
 import time
 import requests
 
-BUCKET_BASE    = "https://bhiv-bucket.onrender.com"
+BUCKET_BASE    = "https://bhiv-bucket-i1l6.onrender.com"
 WRITE_ENDPOINT = f"{BUCKET_BASE}/bucket/artifact"
 LATEST_HASH    = f"{BUCKET_BASE}/bucket/chain-state"
 READ_BY_ID     = f"{BUCKET_BASE}/bucket/artifact/{{artifact_id}}"
@@ -69,12 +69,13 @@ def write_to_bucket(event: dict, stage: str = "perception", parent_hash: str = N
         # ArtifactEnvelope — trace_id goes inside payload only, NOT at envelope level
         payload = {
             "artifact_id":      artifact_id,
+            "trace_id":         event.get("trace_id"),
             "timestamp_utc":    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "schema_version":   "1.0.0",
             "source_module_id": "nupur_signal_perception",
             "artifact_type":    stage,
             "parent_hash":      current_hash,
-            "payload":          event  # trace_id lives here inside event
+            "payload":          event
         }
 
         r = requests.post(
