@@ -246,3 +246,13 @@
 {"trace_id": "cb518ee8-ba6d-4eb9-9ca7-fdc17b7ed501", "vessel_type": "submarine", "chunk_ts": 1779357957.439386, "server_ts": "2026-05-21T10:05:57Z", "stage": "signal_ingest", "source": "pipeline_connector"}
 {"trace_id": "de28126a-07a1-4006-b358-09972e53b754", "vessel_type": "unknown", "chunk_ts": 1779357965.5968316, "server_ts": "2026-05-21T10:06:05Z", "stage": "signal_ingest", "source": "pipeline_connector"}
 {"trace_id": "836f4e42-5246-4096-8e35-7395bc484032", "vessel_type": "anomaly", "chunk_ts": 1779357973.4931254, "server_ts": "2026-05-21T10:06:13Z", "stage": "signal_ingest", "source": "pipeline_connector"}
+{"trace_id": "aee31ade-8729-49ae-a458-6a17a8cd3e24", "vessel_type": "cargo", "chunk_ts": 1783935886.3318484, "server_ts": "2026-07-13T09:44:46Z", "stage": "signal_ingest", "source": "pipeline_connector"}
+{"trace_id": "7e9cf0d8-75dc-4f95-9265-3ba719d7dfac", "vessel_type": "speedboat", "chunk_ts": 1783935886.9807782, "server_ts": "2026-07-13T09:44:46Z", "stage": "signal_ingest", "source": "pipeline_connector"}
+{"trace_id": "ef89f61b-2681-4e17-8327-82f769163a11", "vessel_type": "submarine", "chunk_ts": 1783935887.4383097, "server_ts": "2026-07-13T09:44:47Z", "stage": "signal_ingest", "source": "pipeline_connector"}
+{"trace_id": "aa5c6555-2d0c-41c6-8b9c-188838d4bcaa", "vessel_type": "unknown", "chunk_ts": 1783935887.875992, "server_ts": "2026-07-13T09:44:47Z", "stage": "signal_ingest", "source": "pipeline_connector"}
+{"trace_id": "11148a48-1668-440e-be0e-1ea0adc115d2", "vessel_type": "anomaly", "chunk_ts": 1783935888.3479965, "server_ts": "2026-07-13T09:44:48Z", "stage": "signal_ingest", "source": "pipeline_connector"}
+{"trace_id": "725068af-a78e-4e99-9350-e55f5a45ed9a", "vessel_type": "cargo", "chunk_ts": 1783941395.4809926, "server_ts": "2026-07-13T11:16:35Z", "stage": "signal_ingest", "source": "pipeline_connector"}
+{"trace_id": "db6fed1e-07d9-4423-921b-952b085d0c7b", "vessel_type": "speedboat", "chunk_ts": 1783941397.759613, "server_ts": "2026-07-13T11:16:37Z", "stage": "signal_ingest", "source": "pipeline_connector"}
+{"trace_id": "f6b5bd3a-57d0-4f39-a789-8e77c6deb649", "vessel_type": "submarine", "chunk_ts": 1783941398.8275561, "server_ts": "2026-07-13T11:16:38Z", "stage": "signal_ingest", "source": "pipeline_connector"}
+{"trace_id": "9b60b733-7f45-4daa-891c-a0b103f779dc", "vessel_type": "unknown", "chunk_ts": 1783941400.0535245, "server_ts": "2026-07-13T11:16:40Z", "stage": "signal_ingest", "source": "pipeline_connector"}
+{"trace_id": "c2a853c2-5fdf-47bb-a2f1-f09d98532035", "vessel_type": "anomaly", "chunk_ts": 1783941401.2876399, "server_ts": "2026-07-13T11:16:41Z", "stage": "signal_ingest", "source": "pipeline_connector"}

@@ -37,7 +37,7 @@ obs = ObservabilityLogger()
 
 # ── Endpoints  ──────────────────────────────────
 NICAI_ENDPOINT  = "https://dumping-jingle-daylight.ngrok-free.dev/nicai/classify"   # ← Ankita
-STATE_ENDPOINT  = "https://18a4-157-119-200-153.ngrok-free.app/ingest/intelligence"     # ← Raj
+STATE_ENDPOINT  = "http://127.0.0.1:8001/ingest/intelligence"     # ← Raj
 BUCKET_BASE     = "https://bhiv-bucket-i1l6.onrender.com"       # ← Siddhesh
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -196,6 +196,17 @@ def run_pipeline(signal_chunk: dict, aggregator: TemporalAggregator,
           f"validation={intelligence_event.get('validation_status', 'N/A')}")
 
     # Stage 4: State Engine
+    # If NICAI failed, build a minimal intelligence event from perception
+    if not nicai_ok:
+        intelligence_event = {
+            "trace_id":          trace_id,
+            "vessel_type":       perception_event.get("vessel_type", "unknown"),
+            "risk_level":        "HIGH" if perception_event.get("anomaly_flag") else "MEDIUM",
+            "anomaly_flag":      perception_event.get("anomaly_flag", False),
+            "confidence":        perception_event.get("confidence_score", 0.0),
+            "validation_status": "FLAG",
+            "explanation":       "NICAI unavailable — fallback intelligence from perception layer",
+        }
     state_event = send_to_state_engine(intelligence_event)
     state_ok = "error" not in state_event
     print(f"    → state:        {'OK' if state_ok else 'State Engine not connected'}")
