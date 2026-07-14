@@ -25,6 +25,9 @@ import requests
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'intelligence'))
+from vessel_intelligence_engine import process_intelligence
 from perception_node import process_signal
 from hybrid_signal_builder import HybridSignalBuilder
 from temporal_aggregator import TemporalAggregator
@@ -196,16 +199,27 @@ def run_pipeline(signal_chunk: dict, aggregator: TemporalAggregator,
           f"validation={intelligence_event.get('validation_status', 'N/A')}")
 
     # Stage 4: State Engine
-    # If NICAI failed, build a minimal intelligence event from perception
+    # If NICAI failed, use local intelligence engine
     if not nicai_ok:
+        local_intel_input = {
+            "trace_id":           trace_id,
+            "source_type":        "acoustic",
+            "vessel_class":       perception_event.get("vessel_type", "unknown"),
+            "confidence_score":   perception_event.get("confidence_score", 0.0),
+            "visual_features":    [],
+            "dimensions_estimate": {},
+            "ais_data":           {},
+            "timestamp_utc":      perception_event.get("timestamp_utc"),
+        }
+        local_result = process_intelligence(local_intel_input)
         intelligence_event = {
             "trace_id":          trace_id,
-            "vessel_type":       perception_event.get("vessel_type", "unknown"),
-            "risk_level":        "HIGH" if perception_event.get("anomaly_flag") else "MEDIUM",
+            "vessel_type":       local_result.get("vessel_class", "unknown"),
+            "risk_level":        local_result.get("risk_level", "MEDIUM"),
             "anomaly_flag":      perception_event.get("anomaly_flag", False),
-            "confidence":        perception_event.get("confidence_score", 0.0),
-            "validation_status": "FLAG",
-            "explanation":       "NICAI unavailable — fallback intelligence from perception layer",
+            "confidence":        local_result.get("confidence_score", 0.0),
+            "validation_status": local_result.get("validation_status", "FLAG"),
+            "explanation":       local_result.get("explanation", ""),
         }
     state_event = send_to_state_engine(intelligence_event)
     state_ok = "error" not in state_event
