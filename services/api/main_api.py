@@ -23,9 +23,11 @@ import os
 import sys
 import time
 import uuid
+import base64
 from datetime import datetime, timezone
 from typing import Optional
 
+from fastapi import UploadFile, File
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -307,5 +309,71 @@ def run_pipeline_once():
             "explanation": ie.get("explanation"),
             "validation_status": ie.get("validation_status"),
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
+
+
+
+@app.post("/intelligence/image")
+async def process_image(file: UploadFile = File(...)):
+    """
+    Accept an image upload, run it through the intelligence engine.
+    In production this will call Samachar. For now processes locally.
+    """
+    try:
+        from vessel_intelligence_engine import process_intelligence
+
+        # Read image and convert to base64
+        image_bytes  = await file.read()
+        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+        trace_id     = f"IMG-{str(uuid.uuid4())[:8]}"
+
+        # Build intelligence input
+        # In production: POST to Samachar with image_base64
+        # For now: run locally with vision_confidence from file size heuristic
+        intel_input = {
+            "trace_id":            trace_id,
+            "source_type":         "image",
+            "vessel_class":        "unknown",
+            "confidence_score":    0.0,
+            "vision_confidence":   0.5,
+            "visual_features":     [],
+            "dimensions_estimate": {"length_m": None, "beam_m": None},
+            "ais_data":            {"mmsi": None, "speed_knots": None},
+            "ocr_results":         [],
+            "image_base64":        image_base64,
+            "filename":            file.filename,
+        }
+
+        result = process_intelligence(intel_input)
+        return {
+            "trace_id":          result["trace_id"],
+            "vessel_class":      result["vessel_class"],
+            "confidence_score":  result["confidence_score"],
+            "risk_level":        result["risk_level"],
+            "validation_status": result["validation_status"],
+            "explanation":       result["explanation"],
+            "evidence_chain":    result["evidence_chain"],
+            "ocr_operator":      result["ocr_operator"],
+            "ocr_text":          result["ocr_text"],
+            "operator_action":   result["operator_action_required"],
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/intelligence/samachar")
+async def process_samachar_output(payload: dict):
+    """
+    Accept structured intelligence from Samachar and run through SVACS.
+    This is the main integration endpoint for Samachar → SVACS flow.
+    """
+    try:
+        from vessel_intelligence_engine import process_intelligence
+        result = process_intelligence(payload)
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
