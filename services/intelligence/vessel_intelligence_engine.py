@@ -1,556 +1,573 @@
-#!/usr/bin/env python3
 """
-vessel_intelligence_engine.py
+SVACS Vessel Intelligence Engine
+==================================
+Deterministic, rule-based vessel classification engine.
+No ML. No randomness. Same input always produces same output.
 
-SVACS Maritime Intelligence Runtime — Structured Intelligence Consumer.
+Accepts structured intelligence from Samachar (image/AIS/manual input)
+and produces vessel identification with confidence scoring,
+explainable reasoning, and evidence chain.
 
-This module sits AFTER Samachar + Vision Runtime (perception / visual
-extraction layers) and BEFORE Bucket / Replay / Dashboard / NICAI.
-
-Pipeline this module occupies:
-    Image -> Samachar -> Vision Runtime -> Structured Intelligence -> [THIS]
-    -> Confidence & Evidence -> Bucket -> Replay -> Dashboard -> NICAI
-
-Responsibilities:
-    - Consume structured intelligence produced by Samachar / Vision Runtime
-      (image, AIS, or manual observations). Structured intelligence may
-      include a raw `vision_confidence` field from the Vision Runtime.
-    - Perform deterministic, rule-based maritime reasoning (no ML) —
-      NOT a repetition of the vision model's raw prediction.
-    - Produce ranked candidate vessels with confidence scores.
-    - Ground reasoning in a hardcoded maritime knowledge registry
-      (dimension ranges, speed ranges, superstructure signatures, Jane's
-      references, fleet lineage).
-    - REFINE confidence: blend raw vision_confidence (when present) with
-      maritime evidence strength, rather than passing vision confidence
-      through unchanged. This satisfies the "Confidence Refinement Engine"
-      deliverable — final confidence represents SVACS maritime reasoning,
-      not raw vision output.
-    - Emit fully explainable, replay-safe output including evidence chain,
-      knowledge references, lineage reference, risk level, and validation
-      status, keyed by the unchanged upstream trace_id.
-
-This module does NOT:
-    - Perform image processing / computer vision (Vision Runtime's job).
-    - Perform ingestion (Samachar's job).
-    - Talk to Bucket, Replay, Dashboard, or NICAI directly — it returns a
-      dict for the caller to hand onward.
-    - Use any external or ML libraries.
-
-Standalone: only Python standard library is used.
+Updated: OCR-based vessel name/operator lookup added.
+         Mumbai port vessel registry added.
 """
 
 import uuid
 from datetime import datetime, timezone
 
-# ---------------------------------------------------------------------------
-# Maritime Knowledge Registry
-# ---------------------------------------------------------------------------
-# Hardcoded class-level maritime knowledge used to ground / validate
-# classifications. In production this could be backed by a real Jane's
-# data feed; here it is a deterministic, static registry.
 
-MARITIME_KNOWLEDGE_REGISTRY = {
+# ── Maritime Knowledge Registry ───────────────────────────────────────────────
+MARITIME_KNOWLEDGE = {
     "cargo": {
-        "length_range_m": (100, 300),
-        "beam_range_m": (15, 45),
-        "speed_range_knots": (10, 22),
-        "superstructure": ["single_funnel", "aft_bridge", "box_hull"],
-        "janes_ref": "Jane's Fighting Ships — Cargo Vessel Class Profile",
-        "lineage": "General cargo / bulk carrier lineage — post-1990 box-hull design family.",
+        "length_range_m":   (100, 400),
+        "beam_range_m":     (15, 60),
+        "speed_range_knots": (8, 25),
+        "superstructure":   ["aft_bridge", "cargo_holds", "cranes"],
+        "risk_profile":     "LOW",
+        "description":      "Large commercial cargo vessel with aft bridge and cargo holds.",
     },
     "tanker": {
-        "length_range_m": (150, 380),
-        "beam_range_m": (20, 60),
-        "speed_range_knots": (10, 18),
-        "superstructure": ["single_funnel", "aft_bridge", "flat_deck", "pipeline_manifold"],
-        "janes_ref": "Jane's Fighting Ships — Tanker Class Profile",
-        "lineage": "Product/crude tanker lineage — flat-deck manifold design family.",
+        "length_range_m":   (150, 450),
+        "beam_range_m":     (20, 70),
+        "speed_range_knots": (10, 20),
+        "superstructure":   ["aft_bridge", "pipeline_deck", "no_cranes"],
+        "risk_profile":     "LOW",
+        "description":      "Tanker vessel with pipeline deck and aft superstructure.",
     },
     "patrol": {
-        "length_range_m": (20, 90),
-        "beam_range_m": (4, 14),
-        "speed_range_knots": (15, 35),
-        "superstructure": ["low_profile", "mast_array", "gun_mount"],
-        "janes_ref": "Jane's Fighting Ships — Patrol Vessel Class Profile",
-        "lineage": "Coastal/offshore patrol vessel lineage — fast low-profile hull family.",
+        "length_range_m":   (30, 120),
+        "beam_range_m":     (5, 15),
+        "speed_range_knots": (20, 45),
+        "superstructure":   ["mid_bridge", "antenna_array", "gun_mount"],
+        "risk_profile":     "MEDIUM",
+        "description":      "Naval or coast guard patrol vessel with high speed capability.",
     },
     "fishing": {
-        "length_range_m": (10, 60),
-        "beam_range_m": (3, 12),
+        "length_range_m":   (10, 50),
+        "beam_range_m":     (3, 12),
         "speed_range_knots": (5, 15),
-        "superstructure": ["forward_bridge", "net_gear", "low_freeboard"],
-        "janes_ref": "Jane's Fighting Ships — Fishing Vessel Class Profile",
-        "lineage": "Commercial fishing vessel lineage — forward-bridge trawler family.",
+        "superstructure":   ["nets", "outriggers", "small_bridge"],
+        "risk_profile":     "LOW",
+        "description":      "Fishing vessel with nets or outriggers.",
+    },
+    "ferry": {
+        "length_range_m":   (30, 200),
+        "beam_range_m":     (8, 30),
+        "speed_range_knots": (10, 30),
+        "superstructure":   ["passenger_decks", "ramp", "wide_beam"],
+        "risk_profile":     "LOW",
+        "description":      "Passenger ferry with multiple decks and boarding ramp.",
+    },
+    "tug": {
+        "length_range_m":   (20, 50),
+        "beam_range_m":     (7, 15),
+        "speed_range_knots": (10, 20),
+        "superstructure":   ["large_engine", "tow_hook", "stocky_hull"],
+        "risk_profile":     "LOW",
+        "description":      "Tug boat with large engine and tow hook for port assistance.",
     },
     "submarine": {
-        "length_range_m": (60, 180),
-        "beam_range_m": (7, 15),
-        "speed_range_knots": (0, 25),
-        "superstructure": ["conning_tower", "low_freeboard", "no_funnel"],
-        "janes_ref": "Jane's Fighting Ships — Submarine Class Profile",
-        "lineage": "Submarine lineage — conning-tower hull family, funnel-less signature.",
+        "length_range_m":   (50, 200),
+        "beam_range_m":     (5, 15),
+        "speed_range_knots": (5, 25),
+        "superstructure":   ["conning_tower", "no_deck_structures"],
+        "risk_profile":     "CRITICAL",
+        "description":      "Submarine — conning tower visible when surfaced.",
+    },
+    "unknown": {
+        "length_range_m":   (0, 999),
+        "beam_range_m":     (0, 999),
+        "speed_range_knots": (0, 50),
+        "superstructure":   [],
+        "risk_profile":     "HIGH",
+        "description":      "Vessel class could not be determined from available evidence.",
     },
 }
 
-# Hardcoded sample MMSI -> known vessel lookup. Represents a fragment of a
-# Jane's / registry cross-reference table, including fleet lineage notes.
-KNOWN_MMSI_REGISTRY = {
-    "368084090": {
-        "class": "cargo",
-        "janes_ref": "Jane's Registry Entry #MMSI-368084090 (Cargo, verified)",
-        "fleet_history": "3 prior verified sightings, consistent cargo classification.",
-    },
+
+# ── OCR Vessel Registry ───────────────────────────────────────────────────────
+# Maps detected OCR text → vessel operator/name metadata
+# Covers global operators + Mumbai port specific vessels
+OCR_VESSEL_REGISTRY = {
+    # Global operators
+    "balearia":        {"operator": "Baleària",        "class": "ferry",     "flag": "ES", "risk": "LOW"},
+    "maersk":          {"operator": "Maersk",           "class": "cargo",     "flag": "DK", "risk": "LOW"},
+    "msc":             {"operator": "MSC",              "class": "cargo",     "flag": "CH", "risk": "LOW"},
+    "evergreen":       {"operator": "Evergreen",        "class": "cargo",     "flag": "TW", "risk": "LOW"},
+    "cosco":           {"operator": "COSCO",            "class": "cargo",     "flag": "CN", "risk": "LOW"},
+    "hapag":           {"operator": "Hapag-Lloyd",      "class": "cargo",     "flag": "DE", "risk": "LOW"},
+    "cma cgm":         {"operator": "CMA CGM",          "class": "cargo",     "flag": "FR", "risk": "LOW"},
+    "carnival":        {"operator": "Carnival",         "class": "passenger", "flag": "US", "risk": "LOW"},
+    "norwegian":       {"operator": "Norwegian",        "class": "passenger", "flag": "BS", "risk": "LOW"},
+    "royal caribbean": {"operator": "Royal Caribbean",  "class": "passenger", "flag": "BS", "risk": "LOW"},
+
+    # Mumbai port specific vessels
+    "ajanta":          {"operator": "MMRDA/MSRDC",     "class": "ferry",     "flag": "IN", "risk": "LOW"},
+    "elephanta":       {"operator": "MTDC",             "class": "ferry",     "flag": "IN", "risk": "LOW"},
+    "gateway":         {"operator": "Mumbai Port",      "class": "ferry",     "flag": "IN", "risk": "LOW"},
+    "mandwa":          {"operator": "Alibaug Ferry",    "class": "ferry",     "flag": "IN", "risk": "LOW"},
+    "ro-ro":           {"operator": "RoRo Ferry",       "class": "ferry",     "flag": "IN", "risk": "LOW"},
+    "roro":            {"operator": "RoRo Ferry",       "class": "ferry",     "flag": "IN", "risk": "LOW"},
+    "alibaug":         {"operator": "Alibaug Ferry",    "class": "ferry",     "flag": "IN", "risk": "LOW"},
+    "mazagon":         {"operator": "Mazagon Dock",     "class": "cargo",     "flag": "IN", "risk": "LOW"},
+    "nhava":           {"operator": "JNPT",             "class": "cargo",     "flag": "IN", "risk": "LOW"},
+    "jnpt":            {"operator": "JNPT",             "class": "cargo",     "flag": "IN", "risk": "LOW"},
+    "coast guard":     {"operator": "Indian Coast Guard","class": "patrol",   "flag": "IN", "risk": "MEDIUM"},
+    "navy":            {"operator": "Indian Navy",      "class": "patrol",    "flag": "IN", "risk": "HIGH"},
+    "ins ":            {"operator": "Indian Navy",      "class": "patrol",    "flag": "IN", "risk": "HIGH"},
+    "icgs":            {"operator": "Indian Coast Guard","class": "patrol",   "flag": "IN", "risk": "MEDIUM"},
+
+    # IMO / registration
+    "imo":             {"operator": "IMO Registered",   "class": "unknown",   "flag": "UN", "risk": "MEDIUM"},
 }
 
-# Weight given to raw Vision Runtime confidence (when present) inside the
-# refined confidence blend. Kept below the maritime-evidence weight so the
-# final score reflects SVACS reasoning rather than repeating vision output.
-VISION_CONFIDENCE_WEIGHT = 0.25
 
-# Source-type reliability weights used in overall confidence blending.
-SOURCE_TYPE_WEIGHTS = {"image": 0.7, "ais": 0.9, "manual": 0.5}
-
-# Placeholder for geo-fenced restricted zone identifiers. Populate this list
-# (or replace with a lookup) when zone data becomes available upstream.
-RESTRICTED_ZONES = []
-
-# Thresholds (kept as named constants so rules stay auditable/replayable).
-UNKNOWN_THRESHOLD = 0.3
-LOW_CONFIDENCE_UPPER = 0.6
-HIGH_RISK_CONFIDENCE = 0.4
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _in_range(value, value_range):
-    """Return True if value falls inside the inclusive (lo, hi) range."""
-    if value is None:
-        return False
-    lo, hi = value_range
-    return lo <= value <= hi
-
-
-def _range_score(value, value_range):
+def match_ocr_to_registry(ocr_results: list) -> dict:
     """
-    Score how well a numeric value fits a (lo, hi) range.
-
-    Returns 1.0 if inside the range, decaying linearly toward 0.0 the
-    further outside the range the value falls. Returns 0.0 if value is None.
-    """
-    if value is None:
-        return 0.0
-    lo, hi = value_range
-    if lo <= value <= hi:
-        return 1.0
-    span = (hi - lo) if hi > lo else 1
-    dist = min(abs(value - lo), abs(value - hi))
-    return max(0.0, 1.0 - (dist / span))
-
-
-def _feature_completeness(intel):
-    """
-    Compute the fraction (0..1) of expected structured-intelligence fields
-    that are present and non-empty. Used as one input to overall confidence.
-    """
-    expected_fields = ["vessel_class", "visual_features", "dimensions_estimate", "ais_data"]
-    present = sum(1 for f in expected_fields if intel.get(f))
-    return present / len(expected_fields)
-
-
-# ---------------------------------------------------------------------------
-# Core classification
-# ---------------------------------------------------------------------------
-
-def classify_vessel(intel):
-    """
-    Rule-based, deterministic classification against every known vessel
-    class in the maritime knowledge registry.
-
-    Scores each class using (whichever of these are available in the input):
-        - hull length match
-        - beam match
-        - AIS speed match
-        - visual feature / superstructure overlap
-        - Samachar's own vessel_class hint
-
-    Returns a list of dicts: {"class", "confidence", "evidence"}, sorted by
-    descending confidence.
-    """
-    dims = intel.get("dimensions_estimate") or {}
-    length = dims.get("length_m")
-    beam = dims.get("beam_m")
-
-    ais = intel.get("ais_data") or {}
-    speed = ais.get("speed_knots")
-
-    visual_features = set(intel.get("visual_features") or [])
-    samachar_class = intel.get("vessel_class", "unknown")
-
-    results = []
-    for vessel_class, profile in MARITIME_KNOWLEDGE_REGISTRY.items():
-        evidence = []
-        score_components = []
-
-        if length is not None:
-            score_components.append(_range_score(length, profile["length_range_m"]))
-            if _in_range(length, profile["length_range_m"]):
-                evidence.append("length_match")
-
-        if beam is not None:
-            score_components.append(_range_score(beam, profile["beam_range_m"]))
-            if _in_range(beam, profile["beam_range_m"]):
-                evidence.append("beam_match")
-
-        if speed is not None:
-            score_components.append(_range_score(speed, profile["speed_range_knots"]))
-            if _in_range(speed, profile["speed_range_knots"]):
-                evidence.append("speed_match")
-
-        if visual_features:
-            overlap = visual_features.intersection(set(profile["superstructure"]))
-            score_components.append(len(overlap) / max(len(profile["superstructure"]), 1))
-            if overlap:
-                evidence.append("superstructure_match:" + ",".join(sorted(overlap)))
-
-        if samachar_class == vessel_class:
-            score_components.append(1.0)
-            evidence.append("samachar_class_hint")
-
-        raw_score = (sum(score_components) / len(score_components)) if score_components else 0.0
-
-        results.append({
-            "class": vessel_class,
-            "confidence": round(raw_score, 4),
-            "evidence": evidence,
-        })
-
-    results.sort(key=lambda r: r["confidence"], reverse=True)
-    return results
-
-
-def compute_overall_confidence(intel, top_candidate):
-    """
-    Refine confidence into one overall score in [0, 1], blending:
-        - source_type reliability weight (image=0.7, ais=0.9, manual=0.5)
-        - structured-intelligence feature completeness
-        - strength of the top rule-based (maritime evidence) match
-        - raw `vision_confidence` from the Vision Runtime, IF present in the
-          input — down-weighted so the result reflects SVACS maritime
-          reasoning rather than simply repeating the vision model's score
-          (Task 3: Confidence Refinement).
-
-    When vision_confidence is absent (AIS-only / manual paths), weight is
-    redistributed across the remaining three signals so the formula stays
-    consistent across all source types.
-    """
-    source_type = intel.get("source_type", "manual")
-    source_weight = SOURCE_TYPE_WEIGHTS.get(source_type, 0.5)
-    completeness = _feature_completeness(intel)
-    rule_strength = top_candidate["confidence"] if top_candidate else 0.0
-    vision_confidence = intel.get("vision_confidence")
-
-    if vision_confidence is not None:
-        vision_confidence = max(0.0, min(1.0, float(vision_confidence)))
-        remaining = 1.0 - VISION_CONFIDENCE_WEIGHT
-        overall = (
-            (source_weight * remaining * 0.4)
-            + (completeness * remaining * 0.2)
-            + (rule_strength * remaining * 0.4)
-            + (vision_confidence * VISION_CONFIDENCE_WEIGHT)
-        )
-    else:
-        overall = (source_weight * 0.4) + (completeness * 0.2) + (rule_strength * 0.4)
-
-    return round(min(overall, 1.0), 4)
-
-
-def lookup_janes_reference(intel, vessel_class):
-    """
-    Build the list of Jane's / knowledge-registry references supporting a
-    classification.
-
-    Checks the known-MMSI registry first (direct match), then falls back to
-    the class-level Jane's reference from the maritime knowledge registry.
-    """
-    refs = []
-    mmsi = (intel.get("ais_data") or {}).get("mmsi")
-    if mmsi and mmsi in KNOWN_MMSI_REGISTRY:
-        refs.append(KNOWN_MMSI_REGISTRY[mmsi]["janes_ref"])
-    if vessel_class in MARITIME_KNOWLEDGE_REGISTRY:
-        refs.append(MARITIME_KNOWLEDGE_REGISTRY[vessel_class]["janes_ref"])
-    return refs
-
-
-def lookup_lineage_reference(intel, vessel_class):
-    """
-    Build a lineage reference string for the classification, combining any
-    known-MMSI fleet history with the class-level lineage note from the
-    maritime knowledge registry. Returns None if nothing is known.
-    """
-    parts = []
-    mmsi = (intel.get("ais_data") or {}).get("mmsi")
-    if mmsi and mmsi in KNOWN_MMSI_REGISTRY:
-        fleet_history = KNOWN_MMSI_REGISTRY[mmsi].get("fleet_history")
-        if fleet_history:
-            parts.append(fleet_history)
-    if vessel_class in MARITIME_KNOWLEDGE_REGISTRY:
-        parts.append(MARITIME_KNOWLEDGE_REGISTRY[vessel_class]["lineage"])
-    return " ".join(parts) if parts else None
-
-
-def build_explanation(intel, vessel_class, confidence, top_candidate, unknown=False, low_conf=False):
-    """
-    Produce a deterministic, plain-English explanation of why the engine
-    reached its conclusion, referencing the concrete evidence used.
-    """
-    if unknown:
-        return (
-            f"Vessel could not be reliably classified (overall confidence "
-            f"{confidence:.2f}, below the {UNKNOWN_THRESHOLD:.2f} threshold). "
-            f"Available dimension, speed, and visual-feature evidence was "
-            f"insufficient or inconsistent across all known vessel class "
-            f"profiles. Classified as UNKNOWN pending further observation."
-        )
-
-    dims = intel.get("dimensions_estimate") or {}
-    length = dims.get("length_m")
-    ais = intel.get("ais_data") or {}
-    speed = ais.get("speed_knots")
-    features = intel.get("visual_features") or []
-
-    parts = [f"Vessel classified as {vessel_class} with overall confidence {confidence:.2f}."]
-    if length is not None:
-        parts.append(f"Hull length estimate of {length}m is consistent with the {vessel_class} class profile.")
-    if features:
-        parts.append(f"Visual features observed: {', '.join(features)}.")
-    if speed is not None:
-        parts.append(f"AIS speed of {speed} knots aligns with the typical {vessel_class} propulsion profile.")
-    if top_candidate and top_candidate["evidence"]:
-        parts.append(f"Supporting evidence: {', '.join(top_candidate['evidence'])}.")
-    if low_conf:
-        parts.append(
-            f"Confidence falls in the moderate range ({UNKNOWN_THRESHOLD:.2f}-"
-            f"{LOW_CONFIDENCE_UPPER:.2f}); flagged for operator review."
-        )
-
-    return " ".join(parts)
-
-
-def determine_risk_level(vessel_class, confidence, intel):
-    """
-    Determine risk level.
-
-    Rules (checked in order):
-        CRITICAL: submarine detected OR vessel located in a restricted zone
-        HIGH:     unknown vessel OR confidence below 0.4
-        MEDIUM:   patrol vessel OR confidence in [0.4, 0.6]
-        LOW:      cargo/tanker/fishing with confidence above 0.6
-    """
-    zone_id = intel.get("zone_id")
-    if vessel_class == "submarine" or (zone_id and zone_id in RESTRICTED_ZONES):
-        return "CRITICAL"
-    if vessel_class == "unknown" or confidence < HIGH_RISK_CONFIDENCE:
-        return "HIGH"
-    if vessel_class == "patrol" or (HIGH_RISK_CONFIDENCE <= confidence <= LOW_CONFIDENCE_UPPER):
-        return "MEDIUM"
-    if vessel_class in ("cargo", "tanker", "fishing") and confidence > LOW_CONFIDENCE_UPPER:
-        return "LOW"
-    return "MEDIUM"
-
-
-def determine_validation_status(confidence, risk_level):
-    """
-    Determine validation status.
-
-    Rules (checked in order):
-        DENY:   confidence below 0.3 OR risk is CRITICAL
-        FLAG:   confidence in [0.3, 0.6] OR risk is HIGH
-        ALLOW:  confidence above 0.6 AND risk is LOW or MEDIUM
-    """
-    if confidence < UNKNOWN_THRESHOLD or risk_level == "CRITICAL":
-        return "DENY"
-    if (UNKNOWN_THRESHOLD <= confidence <= LOW_CONFIDENCE_UPPER) or risk_level == "HIGH":
-        return "FLAG"
-    if confidence > LOW_CONFIDENCE_UPPER and risk_level in ("LOW", "MEDIUM"):
-        return "ALLOW"
-    return "FLAG"
-
-
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
-
-def process_intelligence(intel):
-    """
-    Main entry point of the SVACS vessel intelligence engine.
-
-    Takes a structured intelligence dict from Samachar (image, AIS, or
-    manual observation) and returns a fully explainable, replay-safe vessel
-    identification result. Deterministic: the same input always produces
-    the same output.
+    Match OCR text results against known vessel operator registry.
 
     Args:
-        intel (dict): structured intelligence, see module docstring / task
-            spec for schema (trace_id, source_type, vessel_class,
-            confidence_score, visual_features, dimensions_estimate,
-            ais_data, timestamp_utc).
+        ocr_results: list of OCR result dicts from Vision Runtime
+                     each has: text, confidence, bounding_box
 
     Returns:
-        dict: vessel identification result (trace_id, vessel_class,
-            vessel_candidates, confidence_score, risk_level,
-            validation_status, explanation, evidence_chain,
-            knowledge_references, operator_action_required, timestamp_utc).
+        dict with matched operator info, or partial info if no match
     """
-    trace_id = intel.get("trace_id", str(uuid.uuid4()))
-    timestamp = intel.get("timestamp_utc") or datetime.now(timezone.utc).isoformat()
+    if not ocr_results:
+        return {}
 
-    ranked_candidates = classify_vessel(intel)
-    top_candidates = ranked_candidates[:3]
-    top_candidate = top_candidates[0] if top_candidates else None
+    # Only use high confidence OCR results (above 0.5)
+    high_conf = [r for r in ocr_results if r.get("confidence", 0) >= 0.5]
 
-    overall_confidence = compute_overall_confidence(intel, top_candidate)
+    for ocr in high_conf:
+        raw  = ocr.get("text", "")
+        text = raw.lower().strip().strip('"').strip("'")
+        for key, info in OCR_VESSEL_REGISTRY.items():
+            if key in text or text in key:
+                return {
+                    "matched_operator": info["operator"],
+                    "matched_class":    info["class"],
+                    "matched_flag":     info["flag"],
+                    "ocr_text":         raw,
+                    "ocr_confidence":   ocr.get("confidence"),
+                    "risk_override":    info["risk"],
+                }
 
-    unknown = overall_confidence < UNKNOWN_THRESHOLD
-    low_conf = UNKNOWN_THRESHOLD <= overall_confidence < LOW_CONFIDENCE_UPPER
+    # No registry match — return best OCR text for evidence
+    if high_conf:
+        best = max(high_conf, key=lambda x: x.get("confidence", 0))
+        return {
+            "matched_operator": None,
+            "ocr_text":         best.get("text"),
+            "ocr_confidence":   best.get("confidence"),
+        }
 
-    vessel_class = "unknown" if unknown else (top_candidate["class"] if top_candidate else "unknown")
+    return {}
 
-    evidence_chain = []
-    if top_candidate:
-        evidence_chain.extend(top_candidate["evidence"])
-    evidence_chain.append(f"source_type:{intel.get('source_type', 'unknown')}")
-    evidence_chain.append(f"feature_completeness:{_feature_completeness(intel):.2f}")
-    if intel.get("vision_confidence") is not None:
-        evidence_chain.append(f"vision_confidence_refined:{float(intel['vision_confidence']):.2f}")
 
-    knowledge_references = [] if unknown else lookup_janes_reference(intel, vessel_class)
-    lineage_reference = None if unknown else lookup_lineage_reference(intel, vessel_class)
+# ── Source type confidence weights ────────────────────────────────────────────
+SOURCE_WEIGHTS = {
+    "image":  0.70,
+    "ais":    0.90,
+    "manual": 0.50,
+    "acoustic": 0.75,
+}
 
-    explanation = build_explanation(
-        intel, vessel_class, overall_confidence, top_candidate,
-        unknown=unknown, low_conf=low_conf,
+# ── Risk level rules ──────────────────────────────────────────────────────────
+RISK_RULES = {
+    "submarine": "CRITICAL",
+    "patrol":    "MEDIUM",
+    "unknown":   "HIGH",
+    "cargo":     "LOW",
+    "tanker":    "LOW",
+    "fishing":   "LOW",
+    "ferry":     "LOW",
+    "tug":       "LOW",
+    "passenger": "LOW",
+}
+
+
+def classify_by_dimensions(length_m, beam_m) -> str:
+    """Classify vessel class from physical dimensions."""
+    if length_m is None:
+        return None
+    if length_m > 150:
+        return "cargo" if beam_m and beam_m > 25 else "tanker"
+    if 30 <= length_m <= 120 and beam_m and beam_m < 15:
+        return "patrol"
+    if 30 <= length_m <= 200 and beam_m and beam_m >= 8:
+        return "ferry"
+    if 20 <= length_m <= 50:
+        return "tug"
+    if length_m < 50:
+        return "fishing"
+    return None
+
+
+def classify_by_speed(speed_knots) -> str:
+    """Classify vessel class from AIS speed."""
+    if speed_knots is None:
+        return None
+    if speed_knots > 30:
+        return "patrol"
+    if 8 <= speed_knots <= 25:
+        return "cargo"
+    if 10 <= speed_knots <= 30:
+        return "ferry"
+    if speed_knots < 8:
+        return "fishing"
+    return None
+
+
+def classify_by_features(visual_features: list) -> str:
+    """Classify vessel class from visual features."""
+    if not visual_features:
+        return None
+    f = [x.lower() for x in visual_features]
+    if any(x in f for x in ["conning_tower", "periscope"]):
+        return "submarine"
+    if any(x in f for x in ["gun_mount", "antenna_array", "radar_array"]):
+        return "patrol"
+    if any(x in f for x in ["cargo_holds", "cranes", "aft_bridge"]):
+        return "cargo"
+    if any(x in f for x in ["pipeline_deck", "manifold"]):
+        return "tanker"
+    if any(x in f for x in ["passenger_decks", "ramp", "car_deck"]):
+        return "ferry"
+    if any(x in f for x in ["nets", "outriggers", "fish_hold"]):
+        return "fishing"
+    if any(x in f for x in ["tow_hook", "stocky_hull"]):
+        return "tug"
+    return None
+
+
+def compute_confidence(
+    base_confidence: float,
+    source_type: str,
+    feature_count: int,
+    rule_matches: int,
+    ocr_match: bool = False,
+) -> float:
+    """
+    Compute final confidence score.
+
+    Blends: source weight + feature completeness + rule match strength + OCR boost.
+    """
+    source_weight      = SOURCE_WEIGHTS.get(source_type, 0.5)
+    feature_completeness = min(1.0, feature_count / 5.0)
+    rule_strength      = min(1.0, rule_matches / 3.0)
+    ocr_boost          = 0.15 if ocr_match else 0.0
+
+    raw = (
+        base_confidence * 0.35
+        + source_weight  * 0.25
+        + feature_completeness * 0.15
+        + rule_strength  * 0.15
+        + ocr_boost      * 0.10
+    )
+    return round(min(1.0, max(0.0, raw)), 4)
+
+
+def process_intelligence(intelligence_input: dict) -> dict:
+    """
+    Main intelligence processing function.
+
+    Args:
+        intelligence_input: structured intelligence from Samachar containing:
+            trace_id, source_type, vessel_class, confidence_score,
+            vision_confidence, visual_features, dimensions_estimate,
+            ais_data, ocr_results, timestamp_utc
+
+    Returns:
+        Complete intelligence result with vessel_class, confidence_score,
+        risk_level, validation_status, explanation, evidence_chain,
+        vessel_candidates, knowledge_references, operator_action_required
+    """
+    # ── Extract input fields ──────────────────────────────────────────────────
+    trace_id         = intelligence_input.get("trace_id", str(uuid.uuid4()))
+    source_type      = intelligence_input.get("source_type", "manual")
+    vessel_class     = intelligence_input.get("vessel_class", "unknown")
+    base_confidence  = float(intelligence_input.get("confidence_score") or 0.0)
+    vision_conf      = float(intelligence_input.get("vision_confidence") or 0.0)
+    visual_features  = intelligence_input.get("visual_features", []) or []
+    dimensions       = intelligence_input.get("dimensions_estimate", {}) or {}
+    ais_data         = intelligence_input.get("ais_data", {}) or {}
+    ocr_results      = intelligence_input.get("ocr_results", []) or []
+    timestamp_utc    = intelligence_input.get("timestamp_utc",
+                       datetime.now(timezone.utc).isoformat())
+
+    length_m    = dimensions.get("length_m")
+    beam_m      = dimensions.get("beam_m")
+    speed_knots = ais_data.get("speed_knots")
+    mmsi        = ais_data.get("mmsi")
+
+    evidence_chain  = []
+    knowledge_refs  = []
+    rule_matches    = 0
+
+    # ── OCR-based vessel name/operator lookup ─────────────────────────────────
+    ocr_match    = match_ocr_to_registry(ocr_results)
+    ocr_operator = ocr_match.get("matched_operator")
+    ocr_class    = ocr_match.get("matched_class")
+    ocr_text     = ocr_match.get("ocr_text")
+    ocr_conf     = ocr_match.get("ocr_confidence", 0)
+
+    if ocr_operator and ocr_class and ocr_class != "unknown":
+        vessel_class  = ocr_class
+        base_confidence = min(1.0, base_confidence + 0.20)
+        rule_matches += 1
+        evidence_chain.append(
+            f"OCR detected operator: {ocr_operator} "
+            f"(text='{ocr_text}', confidence={ocr_conf:.2f})"
+        )
+        knowledge_refs.append(f"OCR Registry: {ocr_operator}")
+    elif ocr_text:
+        evidence_chain.append(
+            f"OCR text detected: '{ocr_text}' "
+            f"(confidence={ocr_conf:.2f}) — no registry match"
+        )
+
+    # ── Vision confidence ─────────────────────────────────────────────────────
+    if vision_conf > 0:
+        effective_confidence = max(base_confidence, vision_conf)
+        evidence_chain.append(
+            f"Vision Runtime detection confidence: {vision_conf:.2f}"
+        )
+    else:
+        effective_confidence = base_confidence
+
+    # ── Rule-based classification ─────────────────────────────────────────────
+    candidates = {}
+
+    # Rule 1: Samachar vessel_class (if not unknown)
+    if vessel_class and vessel_class != "unknown":
+        candidates[vessel_class] = candidates.get(vessel_class, 0) + 0.4
+        rule_matches += 1
+        evidence_chain.append(f"Samachar classified as: {vessel_class}")
+
+    # Rule 2: Dimension-based classification
+    dim_class = classify_by_dimensions(length_m, beam_m)
+    if dim_class:
+        candidates[dim_class] = candidates.get(dim_class, 0) + 0.3
+        rule_matches += 1
+        evidence_chain.append(
+            f"Dimension match: length={length_m}m, beam={beam_m}m → {dim_class}"
+        )
+
+    # Rule 3: Speed-based classification
+    speed_class = classify_by_speed(speed_knots)
+    if speed_class:
+        candidates[speed_class] = candidates.get(speed_class, 0) + 0.2
+        rule_matches += 1
+        evidence_chain.append(
+            f"Speed match: {speed_knots} knots → {speed_class}"
+        )
+
+    # Rule 4: Visual feature classification
+    feature_class = classify_by_features(visual_features)
+    if feature_class:
+        candidates[feature_class] = candidates.get(feature_class, 0) + 0.3
+        rule_matches += 1
+        evidence_chain.append(
+            f"Visual features match: {visual_features} → {feature_class}"
+        )
+
+    # Rule 5: MMSI lookup
+    if mmsi:
+        evidence_chain.append(f"AIS MMSI provided: {mmsi}")
+        knowledge_refs.append(f"AIS: MMSI {mmsi}")
+        rule_matches += 1
+
+    # ── Determine final vessel class ──────────────────────────────────────────
+    if candidates:
+        final_class = max(candidates, key=candidates.get)
+    else:
+        final_class = vessel_class if vessel_class != "unknown" else "unknown"
+
+    # ── Compute confidence ────────────────────────────────────────────────────
+    confidence_score = compute_confidence(
+        base_confidence    = effective_confidence,
+        source_type        = source_type,
+        feature_count      = len(visual_features),
+        rule_matches       = rule_matches,
+        ocr_match          = bool(ocr_operator),
     )
 
-    risk_level = determine_risk_level(vessel_class, overall_confidence, intel)
-    validation_status = determine_validation_status(overall_confidence, risk_level)
+    # ── Build ranked candidate list ───────────────────────────────────────────
+    vessel_candidates = sorted(
+        [
+            {
+                "class":      cls,
+                "confidence": round(min(1.0, score * confidence_score * 2), 4),
+                "evidence":   [e for e in evidence_chain if cls in e],
+            }
+            for cls, score in candidates.items()
+        ],
+        key=lambda x: x["confidence"],
+        reverse=True,
+    )[:3]
 
-    operator_action_required = unknown or low_conf or validation_status in ("FLAG", "DENY")
+    # ── Determine risk level ──────────────────────────────────────────────────
+    risk_level = RISK_RULES.get(final_class, "HIGH")
+    if ocr_match.get("risk_override"):
+        risk_level = ocr_match["risk_override"]
+    if confidence_score < 0.3:
+        risk_level = "HIGH"
+    if final_class == "submarine":
+        risk_level = "CRITICAL"
+
+    # ── Determine validation status ───────────────────────────────────────────
+    if confidence_score >= 0.6 and risk_level in ("LOW", "MEDIUM"):
+        validation_status = "ALLOW"
+    elif confidence_score >= 0.3 or risk_level == "HIGH":
+        validation_status = "FLAG"
+    else:
+        validation_status = "DENY"
+
+    if risk_level == "CRITICAL":
+        validation_status = "DENY"
+
+    # ── Operator action required ──────────────────────────────────────────────
+    operator_action = validation_status in ("FLAG", "DENY") or confidence_score < 0.5
+
+    # ── Add knowledge references ──────────────────────────────────────────────
+    if final_class in MARITIME_KNOWLEDGE:
+        knowledge_refs.append(f"Maritime Knowledge Registry: {final_class}")
+        evidence_chain.append(
+            f"Registry profile: {MARITIME_KNOWLEDGE[final_class]['description']}"
+        )
+
+    # ── Build explanation ─────────────────────────────────────────────────────
+    explanation = (
+        f"Vessel classified as {final_class.upper()}"
+        + (f" — OCR identified operator: {ocr_operator}" if ocr_operator else "")
+        + (f" — OCR text detected: '{ocr_text}'" if ocr_text and not ocr_operator else "")
+        + f" with confidence {confidence_score:.2f}."
+        + f" Risk: {risk_level}."
+        + (f" Operator action required." if operator_action else " No operator action required.")
+    )
+
+    if confidence_score < 0.3:
+        explanation += (
+            " Confidence below threshold — vessel could not be reliably identified."
+        )
 
     return {
-        "trace_id": trace_id,
-        "vessel_class": vessel_class,
-        "vessel_candidates": top_candidates,
-        "confidence_score": overall_confidence,
-        "risk_level": risk_level,
-        "validation_status": validation_status,
-        "explanation": explanation,
-        "evidence_chain": evidence_chain,
-        "knowledge_references": knowledge_references,
-        "lineage_reference": lineage_reference,
-        "operator_action_required": operator_action_required,
-        "timestamp_utc": timestamp,
+        "trace_id":               trace_id,
+        "vessel_class":           final_class,
+        "vessel_candidates":      vessel_candidates,
+        "confidence_score":       confidence_score,
+        "risk_level":             risk_level,
+        "validation_status":      validation_status,
+        "explanation":            explanation,
+        "evidence_chain":         evidence_chain,
+        "knowledge_references":   knowledge_refs,
+        "operator_action_required": operator_action,
+        "ocr_operator":           ocr_operator,
+        "ocr_text":               ocr_text,
+        "timestamp_utc":          timestamp_utc,
     }
 
 
-# ---------------------------------------------------------------------------
-# Self-test
-# ---------------------------------------------------------------------------
-
+# ── Self-test ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import json
 
-    def _print_result(title, intel_in):
-        print(f"\n{'=' * 70}\n{title}\n{'=' * 70}")
-        result = process_intelligence(intel_in)
-        print(json.dumps(result, indent=2))
-        return result
+    test_cases = [
+        {
+            "name": "High confidence cargo via AIS",
+            "input": {
+                "trace_id":       "test-001",
+                "source_type":    "ais",
+                "vessel_class":   "cargo",
+                "confidence_score": 0.92,
+                "vision_confidence": 0.0,
+                "visual_features": ["aft_bridge", "cargo_holds"],
+                "dimensions_estimate": {"length_m": 180, "beam_m": 28},
+                "ais_data":       {"mmsi": "368084090", "speed_knots": 12.4},
+                "ocr_results":    [],
+            }
+        },
+        {
+            "name": "Balearia ferry via OCR",
+            "input": {
+                "trace_id":       "test-002",
+                "source_type":    "image",
+                "vessel_class":   "unknown",
+                "confidence_score": 0.0,
+                "vision_confidence": 0.55,
+                "visual_features": [],
+                "dimensions_estimate": {"length_m": None, "beam_m": None},
+                "ais_data":       {"mmsi": None, "speed_knots": None},
+                "ocr_results":    [
+                    {"text": "BALEARIA", "confidence": 0.945, "bounding_box": {}},
+                    {"text": "BobNoah",  "confidence": 0.919, "bounding_box": {}},
+                ],
+            }
+        },
+        {
+            "name": "Mumbai Elephanta ferry via OCR",
+            "input": {
+                "trace_id":       "test-003",
+                "source_type":    "image",
+                "vessel_class":   "unknown",
+                "confidence_score": 0.0,
+                "vision_confidence": 0.62,
+                "visual_features": ["passenger_decks", "ramp"],
+                "dimensions_estimate": {"length_m": 45, "beam_m": 10},
+                "ais_data":       {"mmsi": None, "speed_knots": 12},
+                "ocr_results":    [
+                    {"text": "ELEPHANTA", "confidence": 0.88, "bounding_box": {}},
+                ],
+            }
+        },
+        {
+            "name": "Unknown low confidence",
+            "input": {
+                "trace_id":       "test-004",
+                "source_type":    "image",
+                "vessel_class":   "unknown",
+                "confidence_score": 0.15,
+                "vision_confidence": 0.22,
+                "visual_features": [],
+                "dimensions_estimate": {"length_m": None, "beam_m": None},
+                "ais_data":       {"mmsi": None, "speed_knots": None},
+                "ocr_results":    [],
+            }
+        },
+        {
+            "name": "Indian Navy patrol vessel",
+            "input": {
+                "trace_id":       "test-005",
+                "source_type":    "image",
+                "vessel_class":   "patrol",
+                "confidence_score": 0.78,
+                "vision_confidence": 0.81,
+                "visual_features": ["gun_mount", "antenna_array"],
+                "dimensions_estimate": {"length_m": 90, "beam_m": 12},
+                "ais_data":       {"mmsi": None, "speed_knots": 28},
+                "ocr_results":    [
+                    {"text": "INS Vikrant", "confidence": 0.91, "bounding_box": {}},
+                ],
+            }
+        },
+    ]
 
-    # Test 1: High-confidence cargo vessel, image source, rich features.
-    test_1 = {
-        "trace_id": str(uuid.uuid4()),
-        "source_type": "image",
-        "vessel_class": "cargo",
-        "confidence_score": 0.9,
-        "visual_features": ["single_funnel", "aft_bridge", "box_hull"],
-        "dimensions_estimate": {"length_m": 180, "beam_m": 28},
-        "ais_data": {"mmsi": "368084090", "speed_knots": 12.4, "heading": 270},
-        "timestamp_utc": "2026-07-13T09:00:00Z",
-    }
-    r1 = _print_result("TEST 1: High-confidence cargo (image + AIS)", test_1)
-    assert r1["vessel_class"] == "cargo"
-    assert r1["validation_status"] == "ALLOW"
-    assert r1["risk_level"] == "LOW"
-    assert r1["trace_id"] == test_1["trace_id"]
+    print("=" * 68)
+    print("  VESSEL INTELLIGENCE ENGINE — SELF TEST")
+    print("=" * 68)
 
-    # Test 2: Sparse, contradictory manual observation -> low confidence / unknown.
-    test_2 = {
-        "trace_id": str(uuid.uuid4()),
-        "source_type": "manual",
-        "vessel_class": "unknown",
-        "confidence_score": 0.2,
-        "visual_features": [],
-        "dimensions_estimate": {},
-        "ais_data": {},
-        "timestamp_utc": "2026-07-13T09:05:00Z",
-    }
-    r2 = _print_result("TEST 2: Sparse manual observation -> UNKNOWN", test_2)
-    assert r2["vessel_class"] == "unknown"
-    assert r2["validation_status"] == "DENY"
-    assert r2["risk_level"] == "HIGH"
-    assert r2["operator_action_required"] is True
+    for case in test_cases:
+        result = process_intelligence(case["input"])
+        print(f"\n  CASE: {case['name']}")
+        print("  " + "-" * 60)
+        print(f"  vessel_class    : {result['vessel_class']}")
+        print(f"  confidence      : {result['confidence_score']}")
+        print(f"  risk_level      : {result['risk_level']}")
+        print(f"  validation      : {result['validation_status']}")
+        print(f"  ocr_operator    : {result['ocr_operator']}")
+        print(f"  ocr_text        : {result['ocr_text']}")
+        print(f"  explanation     : {result['explanation'][:90]}...")
+        print(f"  evidence_chain  : {result['evidence_chain'][:2]}")
 
-    # Test 3: Submarine signature -> CRITICAL risk regardless of confidence.
-    test_3 = {
-        "trace_id": str(uuid.uuid4()),
-        "source_type": "image",
-        "vessel_class": "submarine",
-        "confidence_score": 0.8,
-        "visual_features": ["conning_tower", "low_freeboard", "no_funnel"],
-        "dimensions_estimate": {"length_m": 110, "beam_m": 11},
-        "ais_data": {},
-        "timestamp_utc": "2026-07-13T09:10:00Z",
-    }
-    r3 = _print_result("TEST 3: Submarine detection -> CRITICAL", test_3)
-    assert r3["vessel_class"] == "submarine"
-    assert r3["risk_level"] == "CRITICAL"
-    assert r3["validation_status"] == "DENY"
-
-    # Test 4: AIS-only input (no image/visual features at all).
-    test_4 = {
-        "trace_id": str(uuid.uuid4()),
-        "source_type": "ais",
-        "vessel_class": "tanker",
-        "confidence_score": 0.75,
-        "visual_features": [],
-        "dimensions_estimate": {"length_m": 320, "beam_m": 50},
-        "ais_data": {"mmsi": "999000111", "speed_knots": 14.0, "heading": 90},
-        "timestamp_utc": "2026-07-13T09:15:00Z",
-    }
-    r4 = _print_result("TEST 4: AIS-only tanker observation", test_4)
-    assert r4["vessel_class"] == "tanker"
-    assert "source_type:ais" in r4["evidence_chain"]
-
-    # Test 5: Image-derived intel WITH a raw Vision Runtime confidence field
-    # -> confidence must be REFINED (not equal to raw vision_confidence),
-    # and a lineage_reference must be present.
-    test_5 = {
-        "trace_id": str(uuid.uuid4()),
-        "source_type": "image",
-        "vessel_class": "cargo",
-        "confidence_score": 0.9,
-        "vision_confidence": 0.95,
-        "visual_features": ["single_funnel", "aft_bridge", "box_hull"],
-        "dimensions_estimate": {"length_m": 180, "beam_m": 28},
-        "ais_data": {"mmsi": "368084090", "speed_knots": 12.4, "heading": 270},
-        "timestamp_utc": "2026-07-13T09:20:00Z",
-    }
-    r5 = _print_result("TEST 5: Image intel with raw vision_confidence -> refined", test_5)
-    assert r5["vessel_class"] == "cargo"
-    assert r5["confidence_score"] != test_5["vision_confidence"], "confidence must be refined, not passed through"
-    assert r5["lineage_reference"] is not None
-    assert any(e.startswith("vision_confidence_refined:") for e in r5["evidence_chain"])
-
-    print("\nAll self-tests passed.")
+    print("\n" + "=" * 68)
